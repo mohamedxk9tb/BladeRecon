@@ -23,9 +23,9 @@ subdomains -> probe -> js -> endpoints -> secrets -> parameters -> intelligence 
 It is designed to be:
 
 - Lightweight and Windows-friendly
-- Beginner friendly
-- Useful for bug bounty and small pentest workflows
-- Easy to inspect manually and automate from files
+- Beginner friendly without hiding operational details
+- Useful for bug bounty and small pentest workflows that need safe defaults
+- Easy to inspect manually, automate from files, and hand over as reports
 
 It is not intended to replace Amass, distributed recon stacks, or enterprise scanners.
 
@@ -34,26 +34,30 @@ It is not intended to replace Amass, distributed recon stacks, or enterprise sca
 Additional release media is stored in `assets/`:
 
 - `logo.png`: square project mark
-- `report-logo.png`: report header/logo source
-- `social-preview.png`: repository/social card preview
+- `report-logo.png`: report branding used inside generated reports
+- `social-preview.png`: repository/social preview that communicates the project identity
 
 ### CLI Preview
 
 ![BladeRecon CLI preview](assets/cli-preview.png)
 
-- Dimensions: `1600 x 1000`
-- Format: PNG
-- Content: BladeRecon banner, realistic scan output, `doctor` output, and a professional dark terminal frame
-- Data policy: sanitized `example.com` target, no fake findings, no sensitive data
+The CLI preview demonstrates the terminal-first workflow: branded startup,
+module status output, dependency checks, and scan summaries. This matters
+because BladeRecon is designed for researchers who need to understand what is
+running, what was skipped, and where artifacts were written.
+
+Data policy: sanitized `example.com` target, no fake findings, no sensitive data.
 
 ### Report Preview
 
 ![BladeRecon report preview](assets/report-preview.png)
 
-- Dimensions: `1600 x 1000`
-- Format: PNG
-- Content: report logo, Risk Score, Intelligence Summary, Infrastructure, Findings Summary, and expanded Performance Analytics
-- Data policy: sanitized sample data with zero fake findings
+The report preview demonstrates the dark offline report, including risk context,
+intelligence summaries, infrastructure evidence, findings status, and
+performance analytics. This matters because BladeRecon's output is meant to help
+researchers prioritize follow-up work, not just count discovered artifacts.
+
+Data policy: sanitized sample data with zero fake findings.
 
 ## Features
 
@@ -67,9 +71,9 @@ Additional release media is stored in `assets/`:
 | Parameters | Historical URL sources plus local fallback URL inventory and wordlist candidates |
 | Screenshots | Optional Playwright screenshots with duplicate/placeholder filtering |
 | Intelligence | Technology, infrastructure, cloud asset, risk, and template-selection context |
-| Advanced Recon | Historical URLs, historical JS, low-noise content discovery, security-header assets, and asset prioritization |
-| Nuclei | Optional Nuclei wrapper with safe, balanced, aggressive, and intelligence-guided profiles |
-| Reports | Dark-theme offline HTML and Markdown reports with KPI cards, section search, exports, intelligence summaries, and performance analytics |
+| Advanced Recon | Historical URLs, historical JS, low-noise content discovery, security-header assets, and explainable asset prioritization |
+| Nuclei | Optional Nuclei wrapper with safe, balanced, aggressive, intelligence-guided profiles, and a lightweight baseline safety net |
+| Reports | Dark-theme offline HTML and Markdown reports with KPI cards, section search, exports, intelligence summaries, priority reasons, and performance analytics |
 | Safety | Safety profiles, request ceilings, per-host concurrency, rate limits, and Nuclei timeout reporting |
 | Utilities | Doctor, repair, cache management, resume state, and install helper |
 
@@ -217,6 +221,14 @@ bladerecon full hackerone.com --profile safe
 ```
 
 The active profile is written to `scan_state.json`, module metadata, and the HTML report.
+
+Smart Nuclei keeps technology-guided tag selection, but it is no longer the
+only coverage layer. When tags are selected automatically, BladeRecon also runs
+a lightweight tag-free baseline pass for `critical,high` severities. Reports and
+`nuclei/metadata.json` show `coverage_strategy` plus the `baseline_scan` status.
+Explicit `--templates` paths can point to a single Nuclei template file or a
+directory of custom templates; they do not need the official template repository
+layout.
 
 ## Output Structure
 

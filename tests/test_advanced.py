@@ -72,3 +72,16 @@ def test_asset_priority_scores_high_interest_assets(tmp_path: Path) -> None:
     assert top["asset"] == "admin.example.com"
     assert top["score"] >= 90
     assert "High-interest endpoint" in top["reasons"]
+    assert top["confidence"] == "High"
+    assert top["strongest_factors"]
+    assert any(item["signal"] == "nuclei_finding" for item in top["signal_details"])
+
+
+def test_content_signal_scores_noise_lower_than_admin_paths() -> None:
+    admin = advanced._content_signal("/admin", 200)
+    test_path = advanced._content_signal("/test", 200)
+    forbidden = advanced._content_signal("/debug", 403)
+
+    assert admin["level"] == "High"
+    assert test_path["level"] == "Low"
+    assert forbidden["score"] >= 45

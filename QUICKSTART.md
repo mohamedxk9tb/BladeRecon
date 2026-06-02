@@ -92,10 +92,10 @@ The report is offline and includes:
 - Endpoints
 - Parameters
 - Recon intelligence
-- Historical URLs, focused content discovery, header-derived assets, and priority assets
+- Historical URLs, focused content discovery, header-derived assets, and priority assets with ranking reasons
 - Secret pattern findings
 - Screenshots if available
-- Nuclei findings if available
+- Nuclei findings if available, including Smart Nuclei baseline safety-net status
 
 The README showcase images live under `assets/` and use sanitized `example.com`
 data only.

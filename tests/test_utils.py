@@ -119,6 +119,18 @@ def test_nuclei_template_status_warns_for_partial_directory(tmp_path: Path) -> N
     assert ".checksum" not in status["missing"]
 
 
+def test_nuclei_template_status_accepts_custom_template_directory(tmp_path: Path) -> None:
+    template_dir = tmp_path / "custom-templates"
+    template_dir.mkdir()
+    (template_dir / "local.yaml").write_text("id: local\n", encoding="utf-8")
+
+    status = utils.nuclei_template_status(template_dir, require_checksum=False)
+
+    assert status["ok"] is True
+    assert status["template_count"] == 1
+    assert "categories" not in status["missing"]
+
+
 def test_clear_cache_handles_read_only_files(tmp_path: Path) -> None:
     cache_file = tmp_path / ".cache" / "urlscan" / "example.com.json"
     cache_file.parent.mkdir(parents=True)

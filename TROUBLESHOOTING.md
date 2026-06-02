@@ -99,6 +99,28 @@ bladerecon nuclei example.com --profile safe --timeout 900
 
 If you do not want a wall-clock limit, omit `--timeout`.
 
+## Nuclei Runs A Baseline After Smart Tags
+
+When Smart Nuclei selects technology tags, BladeRecon also runs a small
+tag-free baseline scan for `critical,high` severities. This is intentional: the
+smart pass stays fast, while the baseline reduces the chance of missing an
+important template outside the selected tags. The report and
+`nuclei/metadata.json` show whether the baseline was applied, completed, failed,
+or timed out.
+
+## Custom Nuclei Templates Are Rejected
+
+If you pass `--templates`, BladeRecon accepts either a single `.yaml`/`.yml`
+file or a directory containing template files. Custom template directories do
+not need to look like the official `nuclei-templates` repository.
+
+```bash
+bladerecon nuclei --list targets.txt --templates ./my-templates --profile safe
+```
+
+BladeRecon normalizes Nuclei target lists before execution, including UTF-8 BOM
+files commonly created by Windows editors or PowerShell.
+
 ## Rate Limits Or WAF Noise
 
 Use the safe profile when a target starts returning `429`, WAF challenges, or connection resets:

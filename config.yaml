@@ -210,6 +210,9 @@ nuclei:
   module_timeout: 0
   enforce_module_timeout: false
   progress_interval: 10
+  baseline_scan:
+    enabled: true
+    severity: "critical,high"
 
 opsec:
   proxy: ""

@@ -202,6 +202,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "module_timeout": 0,
         "enforce_module_timeout": False,
         "progress_interval": 10,
+        "baseline_scan": {
+            "enabled": True,
+            "severity": "critical,high",
+        },
     },
     "advanced": {
         "historical": {
@@ -899,12 +903,13 @@ def nuclei_template_status(template_dir: Optional[Path] = None, require_checksum
     exists = resolved_dir.exists()
     if not resolved_dir.is_file():
         has_categories = bool(categories)
-    ok = bool(exists and has_templates and has_categories)
+    categories_required = bool(require_checksum)
+    ok = bool(exists and has_templates and (has_categories or not categories_required))
     if ok:
         status = "OK"
     elif exists and is_empty:
         status = "MISSING"
-    elif not exists or (not has_templates and not has_categories):
+    elif not exists or (not has_templates and (not has_categories and categories_required)):
         status = "MISSING"
     else:
         status = "WARN"
@@ -915,7 +920,7 @@ def nuclei_template_status(template_dir: Optional[Path] = None, require_checksum
         missing.append("directory")
     if not has_templates:
         missing.append("templates")
-    if not has_categories:
+    if categories_required and not has_categories:
         missing.append("categories")
     return {
         "ok": ok,

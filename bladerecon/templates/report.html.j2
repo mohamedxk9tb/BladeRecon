@@ -238,6 +238,15 @@
         .hero-meta, .finding-head, .failed-shot { align-items: flex-start; flex-direction: column; }
         .risk-panel-grid, .finding-grid { grid-template-columns: 1fr; }
       }
+      @media print {
+        body { background: #ffffff; color: #111827; }
+        .layout { display: block; width: 100%; padding: 0; }
+        .sidebar, .toolbar, .panel-tools, .lightbox, .footer { display: none !important; }
+        .hero, .card, .data-panel, .ranking-card, .intel-item { box-shadow: none; break-inside: avoid; page-break-inside: avoid; }
+        .section { break-inside: avoid; page-break-inside: avoid; margin-bottom: 18px; }
+        .table-wrap { overflow: visible; }
+        a { color: #0369a1; }
+      }
     </style>
   </head>
   <body>
@@ -349,7 +358,7 @@
                 <div class="intel-item"><span class="intel-value">{{ performance.average_ram_mb }} MB</span><span class="intel-label">Average RAM Usage</span></div>
                 <div class="intel-item" title="{{ performance.cpu_note }}"><span class="intel-value">{{ performance.peak_cpu_percent }}%</span><span class="intel-label">Peak CPU Core Utilization</span><span class="intel-note">Process sample; may exceed 100% on multi-core work.</span></div>
                 <div class="intel-item" title="{{ performance.cpu_note }}"><span class="intel-value">{{ performance.average_cpu_percent }}%</span><span class="intel-label">Average CPU Core Utilization</span><span class="intel-note">Process sample across the scan window.</span></div>
-                <div class="intel-item" title="{{ performance.traffic_note }}"><span class="intel-value">{{ performance.total_requests_sent }}</span><span class="intel-label">Probe Requests Attempted</span><span class="intel-note">HTTP probe targets attempted.</span></div>
+                <div class="intel-item" title="{{ performance.traffic_note }}"><span class="intel-value">{{ performance.total_requests_sent }}</span><span class="intel-label">Estimated Requests Attempted</span><span class="intel-note">Derived from module metadata.</span></div>
                 <div class="intel-item" title="{{ performance.traffic_note }}"><span class="intel-value">{{ performance.total_responses_received }}</span><span class="intel-label">HTTP Responses Recorded</span><span class="intel-note">Probe rows with status codes.</span></div>
                 <div class="intel-item"><span class="intel-value">{{ performance.module_count }}</span><span class="intel-label">Module Count</span></div>
               </div>
@@ -547,9 +556,28 @@
           <div class="ranking-grid">
             {% for item in asset_priority.get("top_assets", [])[:6] %}
             <div class="ranking-card">
-              <span class="label">Score {{ item.score }}/100</span>
+              <span class="label">Score {{ item.score }}/100 - {{ item.confidence | default("Medium") }} confidence</span>
               <div class="value">{{ item.asset }}</div>
               <small>{{ item.reasons[:3] | join(", ") }}</small>
+              {% if item.strongest_factors %}
+              <ul class="ranking-list" style="margin-top: 10px;">
+                {% for factor in item.strongest_factors[:3] %}
+                <li><span>{{ factor.reason }}</span><strong>+{{ factor.points }}</strong></li>
+                {% endfor %}
+              </ul>
+              {% endif %}
+            </div>
+            {% endfor %}
+          </div>
+          {% endif %}
+          {% if next_investigation_targets %}
+          <div class="section-head" style="margin-top: 18px;"><h3>Suggested Next Targets</h3><small>Deterministic follow-up queue from priority, content, and historical signals</small></div>
+          <div class="ranking-grid">
+            {% for item in next_investigation_targets[:6] %}
+            <div class="ranking-card">
+              <span class="label">{{ item.type }}</span>
+              <div class="value">{{ item.target }}</div>
+              <small>{{ item.reason }}</small>
             </div>
             {% endfor %}
           </div>
@@ -563,7 +591,9 @@
                   <ul class="ranking-list">
                     <li><span>Legacy paths</span><strong>{{ historical_diff.get("legacy_paths", []) | length }}</strong></li>
                     <li><span>Deprecated endpoints</span><strong>{{ historical_diff.get("deprecated_endpoints", []) | length }}</strong></li>
-                    <li><span>Potentially forgotten</span><strong>{{ historical_diff.get("potentially_forgotten_assets", []) | length }}</strong></li>
+                    <li><span>Historical + alive</span><strong>{{ historical_diff.get("historical_and_currently_alive", []) | length }}</strong></li>
+                    <li><span>Historical only</span><strong>{{ historical_diff.get("historical_only", []) | length }}</strong></li>
+                    <li><span>Unresolved historical</span><strong>{{ historical_diff.get("historical_unresolved", []) | length }}</strong></li>
                   </ul>
                 </div>
                 <div class="ranking-card">
@@ -577,7 +607,7 @@
               </div>
               {% if content_discovery %}
               <div class="section-head" style="margin-top: 18px;"><h3>Interesting Paths</h3><small>Focused discovery results</small></div>
-              <div class="chips">{% for item in content_discovery[:20] %}<span class="chip">{{ item.path }} {{ item.status_code }}</span>{% endfor %}</div>
+              <div class="chips">{% for item in content_discovery[:20] %}<span class="chip">{{ item.path }} {{ item.status_code }} score {{ item.signal_score | default("?") }}</span>{% endfor %}</div>
               {% endif %}
               {% if security_header_assets.get("assets") %}
               <div class="section-head" style="margin-top: 18px;"><h3>Security Header Assets</h3><small>CSP, CORS, and policy-derived assets</small></div>
@@ -626,6 +656,9 @@
             <div class="intel-item"><span class="intel-value">{{ nuclei_metadata.get("duration_seconds", "Not recorded") }}s</span><span class="intel-label">Nuclei Duration</span></div>
             <div class="intel-item"><span class="intel-value">{{ nuclei_metadata.get("findings_count", nuclei_count) }}</span><span class="intel-label">Findings Count</span></div>
           </div>
+          {% if nuclei_metadata.get("baseline_scan") %}
+          <div class="note" style="margin-top: 12px;">Coverage strategy: {{ nuclei_metadata.get("coverage_strategy", "profile/default") }}. Baseline safety net: {{ nuclei_metadata.get("baseline_scan", {}).get("status", "not_applicable") }}{% if nuclei_metadata.get("baseline_scan", {}).get("applied") %}, severity {{ nuclei_metadata.get("baseline_scan", {}).get("severity") }}{% endif %}.</div>
+          {% endif %}
           {% endif %}
           {% endif %}
         </section>

@@ -264,12 +264,42 @@ def _collect_traffic_counts(domain: str, output: Path) -> Dict[str, int]:
     rows: List[dict] = []
     if probe_path.exists():
         try:
-            data = json.loads(probe_path.read_text(encoding="utf-8"))
+            data = json.loads(probe_path.read_text(encoding="utf-8-sig"))
             rows = data if isinstance(data, list) else []
         except Exception:
             rows = []
     requests_sent = len(rows)
     responses_received = len([row for row in rows if isinstance(row, dict) and row.get("status_code")])
+    for metadata_path in (
+        target_dir / "js" / "metadata.json",
+        target_dir / "screenshots" / "metadata.json",
+        target_dir / "nuclei" / "metadata.json",
+        target_dir / "advanced_metadata.json",
+    ):
+        if not metadata_path.exists():
+            continue
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
+        except Exception:
+            continue
+        if not isinstance(metadata, dict):
+            continue
+        if metadata_path.name == "advanced_metadata.json":
+            requests_sent += int(metadata.get("requests_sent", 0) or 0)
+        elif metadata_path.parent.name == "js":
+            requests_sent += int(metadata.get("html_requests", 0) or 0)
+            requests_sent += int(metadata.get("download_requests", 0) or 0)
+        elif metadata_path.parent.name == "screenshots":
+            requests_sent += int(metadata.get("queued", 0) or 0)
+        elif metadata_path.parent.name == "nuclei":
+            targets = int(metadata.get("targets_count", 0) or 0)
+            templates = int(metadata.get("templates_executed", metadata.get("template_candidates", 0)) or 0)
+            requests_sent += max(0, targets * templates)
+            baseline = metadata.get("baseline_scan", {}) if isinstance(metadata.get("baseline_scan"), dict) else {}
+            if baseline.get("applied"):
+                baseline_targets = int(baseline.get("targets_count", 0) or 0)
+                baseline_templates = int(baseline.get("templates_executed", baseline.get("template_candidates", 0)) or 0)
+                requests_sent += max(0, baseline_targets * baseline_templates)
     return {"total_requests_sent": requests_sent, "total_responses_received": responses_received}
 
 
@@ -278,7 +308,7 @@ def _module_duration_rows(domain: str, output: Path) -> List[Tuple[str, float, s
     if not state_file.exists():
         return []
     try:
-        state = json.loads(state_file.read_text(encoding="utf-8"))
+        state = json.loads(state_file.read_text(encoding="utf-8-sig"))
     except Exception:
         return []
     modules = state.get("modules", {}) if isinstance(state, dict) else {}
@@ -665,6 +695,14 @@ def _ensure_readiness(requirements: List[str], output: Path, template_dir: Optio
     return True
 
 
+def _custom_templates_available(path: Optional[Path]) -> bool:
+    if not path or not path.exists():
+        return False
+    if path.is_file():
+        return path.suffix.lower() in {".yaml", ".yml"}
+    return any(path.rglob("*.yaml")) or any(path.rglob("*.yml"))
+
+
 def _format_path_snippet(go_bin: Path, shell: str) -> str:
     """Return the PATH update snippet for the given shell."""
     if shell == "fish":
@@ -692,7 +730,7 @@ def _print_path_helper(go_bin: Path, assume_yes: bool) -> None:
     if shell in {"bash", "zsh"}:
         if assume_yes:
             try:
-                rc_text = rc_path.read_text(encoding="utf-8") if rc_path.exists() else ""
+                rc_text = rc_path.read_text(encoding="utf-8-sig") if rc_path.exists() else ""
                 if str(go_bin) not in rc_text:
                     rc_path.write_text(rc_text + "\n" + snippet + "\n", encoding="utf-8")
                     console.print(f"[green]Updated {rc_path} automatically.[/]")
@@ -703,7 +741,7 @@ def _print_path_helper(go_bin: Path, assume_yes: bool) -> None:
         else:
             if typer.confirm(f"Do you want BladeRecon to append this line to {rc_path}?", default=False):
                 try:
-                    rc_text = rc_path.read_text(encoding="utf-8") if rc_path.exists() else ""
+                    rc_text = rc_path.read_text(encoding="utf-8-sig") if rc_path.exists() else ""
                     if str(go_bin) not in rc_text:
                         rc_path.write_text(rc_text + "\n" + snippet + "\n", encoding="utf-8")
                         console.print(f"[green]Added PATH entry to {rc_path}.[/]")
@@ -908,7 +946,8 @@ def nuclei(
 
         resolved_domain = _normalize_optional_target("nuclei", domain, domain_option)
         active_profile = normalize_scan_profile(profile)
-        if not _ensure_readiness(["Nuclei Binary", "Nuclei Templates", "Output Directories", "Permissions"], output, templates):
+        requirements = ["Nuclei Binary", "Output Directories", "Permissions"] if _custom_templates_available(templates) else ["Nuclei Binary", "Nuclei Templates", "Output Directories", "Permissions"]
+        if not _ensure_readiness(requirements, output, None if _custom_templates_available(templates) else templates):
             raise typer.Exit(1)
         print_module_header("Nuclei Scan", resolved_domain or str(list_file or "targets"))
         nmod.run(domain=resolved_domain, list_file=list_file, profile=active_profile, severity=severity, exclude_tags=exclude_tags, templates=templates, update_templates=update_templates, concurrency=concurrency, timeout=timeout, output=output)
@@ -1307,7 +1346,7 @@ def cache_clear(
 def _count_lines(path: Path) -> int:
     if not path.exists():
         return 0
-    return len([line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()])
+    return len([line for line in path.read_text(encoding="utf-8-sig").splitlines() if line.strip()])
 
 
 def _collect_summary(domain: str, output: Path, duration: str) -> dict:
@@ -1316,7 +1355,7 @@ def _collect_summary(domain: str, output: Path, duration: str) -> dict:
     scan_state = {}
     if scan_state_path.exists():
         try:
-            scan_state = json.loads(scan_state_path.read_text(encoding="utf-8"))
+            scan_state = json.loads(scan_state_path.read_text(encoding="utf-8-sig"))
         except Exception:
             scan_state = {}
     modules = scan_state.get("modules", {}) if isinstance(scan_state, dict) else {}
@@ -1325,7 +1364,7 @@ def _collect_summary(domain: str, output: Path, duration: str) -> dict:
         nuclei_path = target_dir / "nuclei" / "results.json"
     nuclei_count = 0
     if nuclei_path.exists():
-        text = nuclei_path.read_text(encoding="utf-8")
+        text = nuclei_path.read_text(encoding="utf-8-sig")
         if nuclei_path.suffix == ".json":
             try:
                 data = json.loads(text)
@@ -1345,10 +1384,12 @@ def _collect_summary(domain: str, output: Path, duration: str) -> dict:
     screenshot_status = "Skipped" if isinstance(screenshot_state, dict) and screenshot_state.get("status") == "skipped" else screenshot_count
     if isinstance(screenshot_state, dict) and screenshot_state.get("status") == "failed" and not screenshot_count:
         screenshot_status = "Failed"
-    if isinstance(nuclei_state, dict) and nuclei_state.get("status") in {"skipped", "failed"}:
+    if isinstance(nuclei_state, dict) and nuclei_state.get("status") in {"skipped", "failed", "timed_out"}:
         nuclei_status = str(nuclei_state.get("status") or "skipped").title()
         if "templates unavailable" in str(nuclei_state.get("error") or "").lower():
             nuclei_status = "Skipped"
+    elif not nuclei_path.exists():
+        nuclei_status = "Not Run"
     else:
         nuclei_status = nuclei_count
     parameter_state = modules.get("parameters", {}) if isinstance(modules, dict) else {}
@@ -1357,7 +1398,7 @@ def _collect_summary(domain: str, output: Path, duration: str) -> dict:
     risk_path = target_dir / "intelligence" / "risk_score.json"
     if risk_path.exists():
         try:
-            risk_data = json.loads(risk_path.read_text(encoding="utf-8"))
+            risk_data = json.loads(risk_path.read_text(encoding="utf-8-sig"))
             if isinstance(risk_data, dict):
                 risk_score = f"{risk_data.get('score', 0)}/100 ({risk_data.get('level', 'Not classified')})"
         except Exception:

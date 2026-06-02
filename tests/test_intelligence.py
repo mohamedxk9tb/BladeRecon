@@ -28,9 +28,11 @@ def test_detect_technologies_from_probe_and_js():
 
     names = {item["name"] for item in intelligence.detect_technologies(scan_data)}
     react = next(item for item in intelligence.detect_technologies(scan_data) if item["name"] == "React")
+    nextjs = next(item for item in intelligence.detect_technologies(scan_data) if item["name"] == "Next.js")
 
     assert {"Nginx", "PHP", "Next.js"}.issubset(names)
     assert react["confidence"] == "High"
+    assert nextjs["confidence"] == "Medium"
     assert "data-reactroot" in react["evidence"]
 
 

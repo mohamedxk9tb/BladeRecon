@@ -80,7 +80,7 @@ def _read_json(path: Path, default: Any) -> Any:
     if not path.exists():
         return default
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception:
         return default
 
@@ -88,7 +88,7 @@ def _read_json(path: Path, default: Any) -> Any:
 def _read_lines(path: Path) -> List[str]:
     if not path.exists():
         return []
-    return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return [line.strip() for line in path.read_text(encoding="utf-8-sig").splitlines() if line.strip()]
 
 
 def _target_host(target: str) -> str:
@@ -326,6 +326,7 @@ def correlate_historical(target: str, output: Path) -> Dict[str, Any]:
     current_endpoints = [str(row.get("endpoint") or "") for row in current_rows if isinstance(row, dict)]
     historical_rows = _read_json(target_dir / "historical" / "endpoints.json", [])
     historical_endpoints = [str(row.get("endpoint") or "") for row in historical_rows if isinstance(row, dict)]
+    alive_hosts = {host_key(url) for url in _read_lines(target_dir / "probe" / "alive.txt")}
     current_keys = {_path_key(url): url for url in current_endpoints}
     historical_keys = {_path_key(url): url for url in historical_endpoints}
     removed = [historical_keys[key] for key in sorted(set(historical_keys) - set(current_keys))]
@@ -337,13 +338,20 @@ def correlate_historical(target: str, output: Path) -> Dict[str, Any]:
         elif any(token in path for token in ("legacy", "old", "deprecated", "backup")):
             legacy.append(url)
     deprecated = [url for url in historical_endpoints if any(token in url.lower() for token in ("deprecated", "legacy", "/v1/", "old"))]
+    forgotten = dedupe_preserve_order([*removed, *legacy])[:50]
+    currently_alive = [url for url in forgotten if host_key(url) in alive_hosts]
+    historical_only = [url for url in forgotten if host_key(url) not in alive_hosts and host_key(url)]
+    unresolved = [url for url in forgotten if not host_key(url)]
     diff = {
         "current_endpoint_count": len(current_endpoints),
         "historical_endpoint_count": len(historical_endpoints),
         "removed_apis": dedupe_preserve_order(removed),
         "deprecated_endpoints": dedupe_preserve_order(deprecated),
         "legacy_paths": dedupe_preserve_order(legacy),
-        "potentially_forgotten_assets": dedupe_preserve_order([*removed, *legacy])[:50],
+        "potentially_forgotten_assets": forgotten,
+        "historical_and_currently_alive": currently_alive,
+        "historical_only": historical_only,
+        "historical_unresolved": unresolved,
     }
     write_json(target_dir / "historical_diff.json", diff)
     return diff
@@ -411,20 +419,23 @@ async def run_content_discovery(target: str, output: Path, config: dict, profile
                 length = len(resp.content)
                 base_length = baseline_lengths.get(host_key(url), 0)
                 status = int(resp.status_code)
-                if status in {200, 201, 202, 204, 301, 302, 307, 308, 401, 403} and (not base_length or abs(length - base_length) > 32 or status in {401, 403}):
+                signal = _content_signal(urlparse(url).path, status)
+                if status in {200, 201, 202, 204, 301, 302, 307, 308, 401, 403} and signal["score"] >= 45 and (not base_length or abs(length - base_length) > 64 or status in {401, 403}):
                     found.append(
                         {
                             "url": str(resp.url),
                             "path": urlparse(url).path,
                             "status_code": status,
                             "content_length": length,
-                            "signal": _content_signal(urlparse(url).path, status),
+                            "signal": signal["level"],
+                            "signal_score": signal["score"],
+                            "reason": signal["reason"],
                         }
                     )
 
         await asyncio.gather(*(check(url) for url in candidates), return_exceptions=True)
 
-    found = sorted({row["url"]: row for row in found}.values(), key=lambda item: (-int(item["signal_score"]), item["url"]) if "signal_score" in item else item["url"])
+    found = sorted({row["url"]: row for row in found}.values(), key=lambda item: (-int(item.get("signal_score", 0)), item["url"]))
     (out_dir / "interesting_paths.txt").write_text("\n".join(row["url"] for row in found), encoding="utf-8")
     write_json(out_dir / "interesting_paths.json", found)
     metadata = {
@@ -441,16 +452,21 @@ async def run_content_discovery(target: str, output: Path, config: dict, profile
     return metadata, requests
 
 
-def _content_signal(path: str, status: int) -> str:
+def _content_signal(path: str, status: int) -> Dict[str, Any]:
     lower = path.lower()
     score = 25
+    reasons = []
     if any(token in lower for token in ("admin", "dashboard", "internal", "panel")):
         score += 45
+        reasons.append("administrative path keyword")
     if any(token in lower for token in ("login", "auth")):
         score += 30
+        reasons.append("authentication path keyword")
     if status in {401, 403}:
         score += 20
-    return "High" if score >= 70 else "Medium" if score >= 45 else "Low"
+        reasons.append("access-controlled response")
+    level = "High" if score >= 70 else "Medium" if score >= 45 else "Low"
+    return {"level": level, "score": min(100, score), "reason": "; ".join(reasons) or "low-confidence path keyword"}
 
 
 def _extract_header_assets(headers: Dict[str, str], root: str, source_url: str) -> List[Dict[str, str]]:
@@ -598,16 +614,22 @@ def build_asset_priority(target: str, output: Path) -> Dict[str, Any]:
     historical_diff = _read_json(target_dir / "historical_diff.json", {})
     content_rows = _read_json(target_dir / "content_discovery" / "interesting_paths.json", [])
     nuclei_rows = _read_json(target_dir / "nuclei" / "results.json", [])
+    technology_rows = _read_json(target_dir / "technology" / "technology.json", [])
     rows: Dict[str, Dict[str, Any]] = {}
 
     def ensure(host: str) -> Dict[str, Any]:
-        return rows.setdefault(host, {"asset": host, "score": 0, "reasons": [], "signals": {}})
+        return rows.setdefault(host, {"asset": host, "score": 0, "reasons": [], "signals": {}, "signal_details": []})
+
+    def add_signal(row: Dict[str, Any], name: str, points: int, reason: str, confidence: str = "Medium", detail: str = "") -> None:
+        row["score"] += points
+        row["reasons"].append(reason)
+        row["signals"][name] = int(row["signals"].get(name, 0)) + points
+        row["signal_details"].append({"signal": name, "points": points, "confidence": confidence, "reason": reason, "detail": detail})
 
     for url in alive_hosts:
         host = host_key(url)
         row = ensure(host)
-        row["score"] += 20
-        row["reasons"].append("Alive HTTP service")
+        add_signal(row, "alive_http", 20, "Alive HTTP service", "High", url)
     for item in probe_rows if isinstance(probe_rows, list) else []:
         if not isinstance(item, dict):
             continue
@@ -615,41 +637,55 @@ def build_asset_priority(target: str, output: Path) -> Dict[str, Any]:
         row = ensure(host)
         text = " ".join(str(item.get(key) or "") for key in ("title", "server", "cdn", "waf")).lower()
         if any(token in text for token in ("login", "admin", "dashboard", "portal")):
-            row["score"] += 25
-            row["reasons"].append("Login/admin indicator in probe metadata")
+            add_signal(row, "login_admin_probe", 25, "Login/admin indicator in probe metadata", "High", text[:120])
         if item.get("waf"):
-            row["score"] += 5
-            row["reasons"].append("WAF observed")
+            add_signal(row, "waf_observed", 5, "WAF observed", "Low", str(item.get("waf") or ""))
     for item in endpoints if isinstance(endpoints, list) else []:
         endpoint = str(item.get("endpoint") if isinstance(item, dict) else "")
         host = host_key(endpoint)
         row = ensure(host)
-        row["score"] += 3
-        row["signals"]["endpoint_density"] = int(row["signals"].get("endpoint_density", 0)) + 1
+        density_count = int(row["signals"].get("endpoint_count", 0)) + 1
+        row["signals"]["endpoint_count"] = density_count
+        if density_count <= 10:
+            add_signal(row, "endpoint_density", 2, "Endpoint surface observed", "Medium", endpoint)
         if any(token in endpoint.lower() for token in ("admin", "auth", "login", "graphql")):
-            row["score"] += 15
-            row["reasons"].append("High-interest endpoint")
+            add_signal(row, "high_interest_endpoint", 15, "High-interest endpoint", "High", endpoint)
     for item in content_rows if isinstance(content_rows, list) else []:
         url = str(item.get("url") if isinstance(item, dict) else "")
         row = ensure(host_key(url))
-        row["score"] += 20 if str(item.get("signal") or "") == "High" else 10
-        row["reasons"].append("Interesting content discovery path")
+        signal_score = int(item.get("signal_score") or (80 if str(item.get("signal") or "") == "High" else 50))
+        points = 20 if signal_score >= 70 else 10
+        add_signal(row, "interesting_content", points, "Interesting content discovery path", "High" if signal_score >= 70 else "Medium", str(item.get("path") or url))
     for url in historical_diff.get("potentially_forgotten_assets", []) if isinstance(historical_diff, dict) else []:
         row = ensure(host_key(str(url)))
-        row["score"] += 12
-        row["reasons"].append("Historical-only or legacy endpoint")
+        alive_historical = str(url) in set(historical_diff.get("historical_and_currently_alive", []))
+        add_signal(row, "historical_exposure", 16 if alive_historical else 8, "Historical endpoint still tied to live host" if alive_historical else "Historical-only or legacy endpoint", "Medium" if alive_historical else "Low", str(url))
     for item in nuclei_rows if isinstance(nuclei_rows, list) else []:
         if not isinstance(item, dict):
             continue
         host = host_key(str(item.get("host") or item.get("matched") or ""))
         row = ensure(host)
         severity = str(item.get("info", {}).get("severity") or item.get("severity") or "").lower()
-        row["score"] += {"critical": 40, "high": 30, "medium": 18, "low": 8, "info": 3}.get(severity, 5)
-        row["reasons"].append(f"Nuclei {severity or 'unknown'} finding")
+        add_signal(row, "nuclei_finding", {"critical": 40, "high": 30, "medium": 18, "low": 8, "info": 3}.get(severity, 5), f"Nuclei {severity or 'unknown'} finding", "High", str(item.get("template") or ""))
+    for item in technology_rows if isinstance(technology_rows, list) else []:
+        if not isinstance(item, dict):
+            continue
+        tech_name = str(item.get("name") or "")
+        confidence = str(item.get("confidence") or "Medium")
+        hosts = item.get("hosts") if isinstance(item.get("hosts"), list) else []
+        for host in hosts:
+            row = ensure(str(host).lower())
+            if tech_name in {"WordPress", "Drupal", "Joomla", "Laravel"} and confidence.lower() in {"medium", "high"}:
+                add_signal(row, "technology_interest", 10, "High-interest CMS/framework technology", confidence.title(), tech_name)
+            elif tech_name in {"Apache", "Nginx", "IIS", "PHP", "ASP.NET", "Java", "Node.js", "Python"} and confidence.lower() == "high":
+                add_signal(row, "technology_interest", 5, "Server/framework technology observed", confidence.title(), tech_name)
     ranked = []
     for row in rows.values():
         row["score"] = min(100, int(row["score"]))
         row["reasons"] = dedupe_preserve_order(row["reasons"])
+        row["strongest_factors"] = sorted(row["signal_details"], key=lambda item: (-int(item["points"]), item["signal"]))[:3]
+        high_conf = sum(1 for item in row["signal_details"] if item.get("confidence") == "High")
+        row["confidence"] = "High" if row["score"] >= 70 and high_conf >= 2 else "Medium" if row["score"] >= 40 or high_conf else "Low"
         ranked.append(row)
     ranked.sort(key=lambda item: (-int(item["score"]), item["asset"]))
     payload = {"assets": ranked, "top_assets": ranked[:10], "asset_count": len(ranked)}

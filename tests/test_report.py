@@ -40,6 +40,10 @@ def test_report_rendering_with_minimal_outputs(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     (target / "nuclei" / "results.jsonl").write_text("", encoding="utf-8")
+    (target / "nuclei" / "metadata.json").write_text(
+        '{"coverage_strategy":"smart_tags_plus_lightweight_baseline","baseline_scan":{"enabled":true,"applied":true,"status":"completed","severity":"critical,high"},"templates_executed":12,"templates_skipped":3,"duration_seconds":2.5,"findings_count":0}',
+        encoding="utf-8",
+    )
     (target / "screenshots" / "www.example.com.png").write_text("fake", encoding="utf-8")
     (target / "logs").mkdir()
     (target / "logs" / "scan_meta.json").write_text(
@@ -75,6 +79,22 @@ def test_report_rendering_with_minimal_outputs(tmp_path: Path) -> None:
         '{"templates_available":123,"selected_tags":["nginx","php"],"selected":[{"reason":"PHP","tags":["php"]}]}',
         encoding="utf-8",
     )
+    (target / "historical").mkdir()
+    (target / "historical" / "urls.json").write_text('[{"url":"https://www.example.com/old","sources":["wayback"]}]', encoding="utf-8")
+    (target / "historical" / "endpoints.json").write_text('[{"endpoint":"https://www.example.com/api/v1/users"}]', encoding="utf-8")
+    (target / "historical_diff.json").write_text(
+        '{"historical_and_currently_alive":["https://www.example.com/api/v1/users"],"historical_only":[],"historical_unresolved":[],"removed_apis":["https://www.example.com/api/v1/users"],"legacy_paths":["https://www.example.com/api/v1/users"]}',
+        encoding="utf-8",
+    )
+    (target / "content_discovery").mkdir()
+    (target / "content_discovery" / "interesting_paths.json").write_text(
+        '[{"url":"https://www.example.com/admin","path":"/admin","status_code":403,"signal":"High","signal_score":90,"reason":"administrative path keyword; access-controlled response"}]',
+        encoding="utf-8",
+    )
+    (target / "asset_priority.json").write_text(
+        '{"asset_count":1,"top_assets":[{"asset":"www.example.com","score":88,"confidence":"High","reasons":["Alive HTTP service","Interesting content discovery path"],"strongest_factors":[{"signal":"interesting_content","points":20,"confidence":"High","reason":"Interesting content discovery path"}],"signal_details":[{"signal":"alive_http","points":20,"confidence":"High","reason":"Alive HTTP service"}]}]}',
+        encoding="utf-8",
+    )
 
     report.run("example.com", output=tmp_path)
 
@@ -87,6 +107,9 @@ def test_report_rendering_with_minimal_outputs(tmp_path: Path) -> None:
     assert "Technology Overview" in html
     assert "Recon Intelligence" in html
     assert "Advanced Recon Intelligence" in html
+    assert "Suggested Next Targets" in html
+    assert "High confidence" in html
+    assert "Coverage strategy: smart_tags_plus_lightweight_baseline" in html
     assert "Risk Score" in html
     assert "42/100" in html
     assert "Infrastructure Intelligence" in html
@@ -117,7 +140,7 @@ def test_report_rendering_with_minimal_outputs(tmp_path: Path) -> None:
     assert "../screenshots/www.example.com.png" in html
     assert "screenshots\\www.example.com.png" not in html
     assert "2026-05-31 10:00:00 UTC" in html
-    assert "Probe Requests Attempted" in html
+    assert "Estimated Requests Attempted" in html
     assert "HTTP Responses Recorded" in html
     assert "CPU Core Utilization" in html
     assert "12.34s" in html
@@ -126,16 +149,19 @@ def test_report_rendering_with_minimal_outputs(tmp_path: Path) -> None:
     assert "Top RAM Consumers" in html
     assert "Peak RAM Usage" in html
     assert "88.5 MB" in html
-    assert "Probe Requests Attempted" in html
+    assert "Estimated Requests Attempted" in html
     assert "<td>Probe</td>" in html
     md = (target / "reports" / "report.md").read_text(encoding="utf-8")
     assert "- Scan duration: 12.34s" in md
     assert "## Performance Analytics" in md
     assert "- Peak RAM Usage: 88.5 MB" in md
-    assert "- Probe Requests Attempted: 3" in md
+    assert "- Estimated Requests Attempted: 3" in md
     assert "- HTTP Responses Recorded: 2" in md
     assert "### Top Slowest Modules" in md
     assert "### Top RAM Consumers" in md
+    assert "### Top Priority Assets" in md
+    assert "### Suggested Next Investigation Targets" in md
+    assert "- Coverage strategy: smart_tags_plus_lightweight_baseline" in md
     assert "| Probe | Completed | 1.25s | 80.0 MB | 70.0 MB |" in md
     assert "| Nginx 1.30.1 | High |" in md
     assert "nginx/1.30.1 | www.example.com |" in md

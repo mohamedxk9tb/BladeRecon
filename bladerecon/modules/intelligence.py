@@ -60,6 +60,7 @@ TEMPLATE_TAGS: Dict[str, List[str]] = {
 STRONG_TEMPLATE_TECH = {"WordPress", "Drupal", "Joomla", "Laravel"}
 SERVER_TEMPLATE_TECH = {"Apache", "Nginx", "IIS", "LiteSpeed", "PHP", "ASP.NET", "Java", "Node.js", "Python"}
 WEAK_TEMPLATE_TECH = {"React", "Vue", "Angular", "Next.js"}
+FRONTEND_FRAMEWORK_TECH = {"React", "Vue", "Angular", "Next.js"}
 MIN_TEMPLATE_TAG_SCORE = 70
 
 CLOUD_PATTERNS: Dict[str, List[str]] = {
@@ -76,7 +77,7 @@ def _read_json(path: Path, default: Any) -> Any:
     if not path.exists():
         return default
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception:
         return default
 
@@ -84,7 +85,7 @@ def _read_json(path: Path, default: Any) -> Any:
 def _read_lines(path: Path) -> List[str]:
     if not path.exists():
         return []
-    return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return [line.strip() for line in path.read_text(encoding="utf-8-sig").splitlines() if line.strip()]
 
 
 def _host(value: str) -> str:
@@ -159,7 +160,7 @@ def _has_valid_scan_context(target: str, output: Path, target_dir: Path) -> bool
     ]
     for path in artifacts:
         try:
-            if path.exists() and path.read_text(encoding="utf-8").strip():
+            if path.exists() and path.read_text(encoding="utf-8-sig").strip():
                 return True
         except Exception:
             continue
@@ -172,9 +173,22 @@ def detect_technologies(scan_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     def confidence_rank(value: str) -> int:
         return {"low": 1, "medium": 2, "high": 3}.get(str(value or "").strip().lower(), 0)
 
+    def frontend_confidence(name: str, source: str, confidence: str, evidence: str = "") -> str:
+        if name not in FRONTEND_FRAMEWORK_TECH:
+            return confidence
+        source_l = source.lower()
+        evidence_l = evidence.lower()
+        strong_markers = ("data-reactroot", "__react", "ng-version", "__vue__", "data-v-", "__next", "_next/")
+        if any(marker in evidence_l for marker in strong_markers) and ("fingerprint" in source_l or "artifact" in source_l):
+            return confidence
+        if source_l in {"js-asset", "endpoint"} or "title" in source_l:
+            return "Medium" if source_l == "js-asset" else "Low"
+        return "Medium" if str(confidence).strip().lower() == "high" else confidence
+
     def add(name: str, source: str, host: str = "", confidence: str = "Medium", evidence: str = "") -> None:
         if not name:
             return
+        confidence = frontend_confidence(name, source, confidence, evidence)
         row = records.setdefault(name, {"name": name, "sources": set(), "hosts": set(), "confidence": "Medium", "evidence": set()})
         row["sources"].add(source)
         if host:

@@ -121,7 +121,7 @@ def _load_subdomains(target_dir: Path) -> List[str]:
     f = target_dir / "subdomains" / "subdomains.txt"
     if not f.exists():
         return []
-    return deduplicate_subdomains(f.read_text(encoding="utf-8").splitlines())
+    return deduplicate_subdomains(f.read_text(encoding="utf-8-sig").splitlines())
 
 
 def _source_label(source: str) -> str:
@@ -148,7 +148,7 @@ def _load_subdomain_sources(target_dir: Path) -> Dict[str, List[str]]:
     if not path.exists():
         return {}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception:
         return {}
     if not isinstance(data, list):
@@ -175,14 +175,14 @@ def _load_parameters(target_dir: Path) -> List[str]:
     f = target_dir / "parameters" / "parameters.txt"
     if not f.exists():
         return []
-    return deduplicate_parameters(f.read_text(encoding="utf-8").splitlines())
+    return deduplicate_parameters(f.read_text(encoding="utf-8-sig").splitlines())
 
 
 def _load_discovered_parameters(target_dir: Path) -> List[str]:
     f = target_dir / "parameters" / "parameters_from_urls.txt"
     if not f.exists():
         return []
-    return deduplicate_parameters(f.read_text(encoding="utf-8").splitlines())
+    return deduplicate_parameters(f.read_text(encoding="utf-8-sig").splitlines())
 
 
 def _parameter_value_level(name: str) -> str:
@@ -219,7 +219,7 @@ def _load_json_list(path: Path) -> List[dict]:
     if not path.exists():
         return []
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
         return data if isinstance(data, list) else []
     except Exception:
         return []
@@ -265,7 +265,7 @@ def _load_screenshot_failures(target_dir: Path) -> List[dict]:
     if not path.exists():
         return []
     failures = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
         if not line.strip():
             continue
         if "\t" in line:
@@ -282,7 +282,7 @@ def _load_nuclei_findings(target_dir: Path) -> List[dict]:
         nd = target_dir / "nuclei" / "results.json"
     if not nd.exists():
         return []
-    content = nd.read_text(encoding="utf-8")
+    content = nd.read_text(encoding="utf-8-sig")
     if nd.suffix == ".json":
         try:
             data = json.loads(content)
@@ -309,7 +309,7 @@ def _load_nuclei_metadata(target_dir: Path) -> dict:
     if not path.exists():
         return {}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
@@ -320,9 +320,37 @@ def _load_root_json(target_dir: Path, name: str, default: object) -> object:
     if not path.exists():
         return default
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception:
         return default
+
+
+def _next_investigation_targets(asset_priority: dict, content_rows: List[dict], historical_diff: dict) -> List[dict]:
+    targets: List[dict] = []
+    if isinstance(asset_priority, dict):
+        for item in asset_priority.get("top_assets", [])[:5]:
+            if not isinstance(item, dict):
+                continue
+            strongest = item.get("strongest_factors") if isinstance(item.get("strongest_factors"), list) else []
+            reason = strongest[0].get("reason") if strongest and isinstance(strongest[0], dict) else ", ".join(item.get("reasons", [])[:2])
+            targets.append({"target": item.get("asset", ""), "type": "Priority asset", "reason": reason or "Highest combined recon score"})
+    for item in content_rows[:3]:
+        if isinstance(item, dict) and item.get("url"):
+            targets.append({"target": item.get("url"), "type": "Interesting path", "reason": item.get("reason") or item.get("signal") or "Focused content discovery hit"})
+    if isinstance(historical_diff, dict):
+        for url in historical_diff.get("historical_and_currently_alive", [])[:3]:
+            targets.append({"target": url, "type": "Historical live asset", "reason": "Historical endpoint is tied to a currently alive host"})
+        for url in historical_diff.get("historical_only", [])[:2]:
+            targets.append({"target": url, "type": "Historical-only asset", "reason": "Historical endpoint did not appear in current endpoint artifacts"})
+    seen = set()
+    deduped = []
+    for item in targets:
+        key = str(item.get("target") or "")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped[:8]
 
 
 def _load_intelligence_file(target_dir: Path, name: str, default: object) -> object:
@@ -330,7 +358,7 @@ def _load_intelligence_file(target_dir: Path, name: str, default: object) -> obj
     if not path.exists():
         return default
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
         return data
     except Exception:
         return default
@@ -343,7 +371,7 @@ def _load_probe_results(target_dir: Path) -> List[dict]:
     if not path.exists():
         return []
     try:
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8-sig")
         if path.suffix == ".json":
             data = json.loads(text)
             return data if isinstance(data, list) else []
@@ -368,7 +396,7 @@ def _load_alive_hosts(target_dir: Path) -> List[str]:
     f = target_dir / "probe" / "alive.txt"
     if not f.exists():
         return []
-    return deduplicate_alive_urls(f.read_text(encoding="utf-8").splitlines())
+    return deduplicate_alive_urls(f.read_text(encoding="utf-8-sig").splitlines())
 
 
 def _alive_hostnames(alive_hosts: List[str]) -> Set[str]:
@@ -394,7 +422,7 @@ def _load_scan_metadata(target_dir: Path) -> dict:
     if not f.exists():
         return {}
     try:
-        return json.loads(f.read_text(encoding="utf-8"))
+        return json.loads(f.read_text(encoding="utf-8-sig"))
     except Exception:
         return {}
 
@@ -404,7 +432,7 @@ def _load_scan_state(target_dir: Path) -> dict:
     if not f.exists():
         return {}
     try:
-        return json.loads(f.read_text(encoding="utf-8"))
+        return json.loads(f.read_text(encoding="utf-8-sig"))
     except Exception:
         return {}
 
@@ -445,7 +473,7 @@ def _estimate_traffic(target_dir: Path) -> Dict[str, int]:
         if not metadata_path.exists():
             continue
         try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
         except Exception:
             continue
         if metadata_path.name == "advanced_metadata.json":
@@ -459,6 +487,11 @@ def _estimate_traffic(target_dir: Path) -> Dict[str, int]:
             targets = int(metadata.get("targets_count", 0) or 0)
             templates = int(metadata.get("templates_executed", metadata.get("template_candidates", 0)) or 0)
             requests += max(0, targets * templates)
+            baseline = metadata.get("baseline_scan", {}) if isinstance(metadata.get("baseline_scan"), dict) else {}
+            if baseline.get("applied"):
+                baseline_targets = int(baseline.get("targets_count", 0) or 0)
+                baseline_templates = int(baseline.get("templates_executed", baseline.get("template_candidates", 0)) or 0)
+                requests += max(0, baseline_targets * baseline_templates)
     return {"total_requests_sent": requests, "total_responses_received": responses}
 
 
@@ -481,8 +514,8 @@ def _build_performance(scan_meta: dict, scan_state: dict, target_dir: Path) -> D
     performance = scan_meta.get("performance", {}) if isinstance(scan_meta, dict) else {}
     traffic = _estimate_traffic(target_dir)
     if isinstance(performance, dict):
-        traffic["total_requests_sent"] = int(performance.get("total_requests_sent", traffic["total_requests_sent"]) or 0)
-        traffic["total_responses_received"] = int(performance.get("total_responses_received", traffic["total_responses_received"]) or 0)
+        traffic["total_requests_sent"] = max(traffic["total_requests_sent"], int(performance.get("total_requests_sent", 0) or 0))
+        traffic["total_responses_received"] = max(traffic["total_responses_received"], int(performance.get("total_responses_received", 0) or 0))
     module_rows = []
     for name in ("subdomains", "probe", "js", "endpoints", "secrets", "parameters", "intelligence", "advanced", "screenshots", "nuclei"):
         state = modules.get(name, {}) if isinstance(modules, dict) else {}
@@ -515,7 +548,7 @@ def _build_performance(scan_meta: dict, scan_state: dict, target_dir: Path) -> D
         "average_cpu_percent": round(float(performance.get("average_cpu_percent") or 0.0), 2) if isinstance(performance, dict) else 0.0,
         "total_requests_sent": traffic["total_requests_sent"],
         "total_responses_received": traffic["total_responses_received"],
-        "traffic_note": "Request/response counts are derived from HTTP probe results. Requests are attempted probe targets; responses are targets that returned an HTTP status code.",
+        "traffic_note": "Request counts are estimated from module metadata when available, including probe, JavaScript, screenshots, advanced recon, and Nuclei template-target combinations. Responses are HTTP probe rows with status codes.",
         "cpu_note": "CPU values are process CPU core utilization samples. Values above 100% can occur when work spans more than one logical core.",
         "module_count": len(active_rows),
         "top_slowest_modules": top_slowest,
@@ -811,7 +844,7 @@ def _render_markdown(context: dict, out_md: Path) -> None:
     lines.append(f"- Average RAM Usage: {perf.get('average_ram_mb', 0)} MB")
     lines.append(f"- Peak CPU Core Utilization: {perf.get('peak_cpu_percent', 0)}%")
     lines.append(f"- Average CPU Core Utilization: {perf.get('average_cpu_percent', 0)}%")
-    lines.append(f"- Probe Requests Attempted: {perf.get('total_requests_sent', 0)}")
+    lines.append(f"- Estimated Requests Attempted: {perf.get('total_requests_sent', 0)}")
     lines.append(f"- HTTP Responses Recorded: {perf.get('total_responses_received', 0)}")
     if perf.get("traffic_note"):
         lines.append(f"- Traffic Metrics Note: {perf.get('traffic_note')}")
@@ -936,6 +969,9 @@ def _render_markdown(context: dict, out_md: Path) -> None:
     lines.append(f"- Historical endpoints: {len(context.get('historical_endpoints', []))}")
     lines.append(f"- Removed APIs: {len(historical_diff.get('removed_apis', [])) if isinstance(historical_diff, dict) else 0}")
     lines.append(f"- Legacy paths: {len(historical_diff.get('legacy_paths', [])) if isinstance(historical_diff, dict) else 0}")
+    lines.append(f"- Historical + currently alive: {len(historical_diff.get('historical_and_currently_alive', [])) if isinstance(historical_diff, dict) else 0}")
+    lines.append(f"- Historical only: {len(historical_diff.get('historical_only', [])) if isinstance(historical_diff, dict) else 0}")
+    lines.append(f"- Historical unresolved: {len(historical_diff.get('historical_unresolved', [])) if isinstance(historical_diff, dict) else 0}")
     lines.append(f"- Interesting paths: {len(content_rows)}")
     lines.append(f"- Header assets: {len(header_assets.get('assets', [])) if isinstance(header_assets, dict) else 0}")
     lines.append(f"- Historical JS endpoints: {len(historical_js_data.get('endpoints', [])) if isinstance(historical_js_data, dict) else 0}")
@@ -943,9 +979,21 @@ def _render_markdown(context: dict, out_md: Path) -> None:
     if isinstance(asset_priority, dict) and asset_priority.get("top_assets"):
         lines.append("### Top Priority Assets")
         lines.append("")
+        lines.append("| Asset | Score | Confidence | Strongest Factors |")
+        lines.append("| --- | --- | --- | --- |")
         for item in asset_priority.get("top_assets", [])[:10]:
-            reasons = ", ".join(item.get("reasons", [])[:3]) if isinstance(item, dict) else ""
-            lines.append(f"- {item.get('asset')} - {item.get('score')}/100{f' ({reasons})' if reasons else ''}")
+            if not isinstance(item, dict):
+                continue
+            strongest = item.get("strongest_factors") if isinstance(item.get("strongest_factors"), list) else []
+            reasons = "; ".join(str(factor.get("reason") or factor.get("signal") or "") for factor in strongest[:3] if isinstance(factor, dict)) or ", ".join(item.get("reasons", [])[:3])
+            lines.append(f"| {item.get('asset')} | {item.get('score')}/100 | {item.get('confidence', 'Medium')} | {reasons or 'Not recorded'} |")
+        lines.append("")
+    next_targets = context.get("next_investigation_targets", [])
+    if next_targets:
+        lines.append("### Suggested Next Investigation Targets")
+        lines.append("")
+        for item in next_targets:
+            lines.append(f"- {item.get('target')} - {item.get('type')}: {item.get('reason')}")
         lines.append("")
     if not context.get("parameters_skipped_reason"):
         lines.append(f"- Discovered Parameters: {param_intel.get('discovered_count', 0)}")
@@ -991,6 +1039,11 @@ def _render_markdown(context: dict, out_md: Path) -> None:
     lines.append("")
     metadata = context.get("nuclei_metadata", {})
     if metadata:
+        lines.append(f"- Coverage strategy: {metadata.get('coverage_strategy', 'profile/default')}")
+        baseline = metadata.get("baseline_scan", {}) if isinstance(metadata.get("baseline_scan"), dict) else {}
+        if baseline:
+            applied = "applied" if baseline.get("applied") else "not applied"
+            lines.append(f"- Baseline safety net: {applied}, status {baseline.get('status', 'not_applicable')}, severity {baseline.get('severity', 'critical,high')}")
         lines.append(f"- Templates executed: {metadata.get('templates_executed', 'Not recorded')}")
         lines.append(f"- Templates skipped: {metadata.get('templates_skipped', 'Not recorded')}")
         lines.append(f"- Execution duration: {metadata.get('duration_seconds', 'Not recorded')}s")
@@ -1077,6 +1130,7 @@ def run(target: str, output: Path = Path("results"), scan_duration: Optional[str
         "endpoints": _load_json_list(target_dir / "historical_js" / "endpoints.json"),
     }
     asset_priority = _load_root_json(target_dir, "asset_priority.json", {})
+    next_targets = _next_investigation_targets(asset_priority if isinstance(asset_priority, dict) else {}, content_discovery, historical_diff if isinstance(historical_diff, dict) else {})
     advanced_metadata = _load_root_json(target_dir, "advanced_metadata.json", {})
     probe_results = _load_probe_results(target_dir)
     technology_results = _load_technology_results(target_dir)
@@ -1179,6 +1233,7 @@ def run(target: str, output: Path = Path("results"), scan_duration: Optional[str
         "security_header_assets": security_header_assets if isinstance(security_header_assets, dict) else {},
         "historical_js": historical_js,
         "asset_priority": asset_priority if isinstance(asset_priority, dict) else {},
+        "next_investigation_targets": next_targets,
         "advanced_metadata": advanced_metadata if isinstance(advanced_metadata, dict) else {},
         "nuclei_count": nuclei_count,
         "nuclei_available": nuclei_available,

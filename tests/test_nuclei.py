@@ -52,6 +52,30 @@ def test_nuclei_removes_tag_filter_without_touching_other_flags():
     assert nuclei._remove_flag_with_value(cmd, "-tags") == ["nuclei", "-u", "https://example.com", "-as", "-j"]
 
 
+def test_nuclei_baseline_command_removes_tags_and_restores_original_targets(tmp_path):
+    alive = tmp_path / "alive.txt"
+    alive.write_text("https://www.example.com\n", encoding="utf-8")
+    scoped = tmp_path / "scoped.txt"
+    scoped.write_text("https://php.example.com\n", encoding="utf-8")
+    cmd = ["nuclei", "-l", str(scoped), "-severity", "critical,high,medium", "-tags", "php", "-j"]
+
+    baseline = nuclei._baseline_target_command(cmd, None, alive)
+    baseline = nuclei._replace_flag_value(baseline, "-severity", "critical,high")
+
+    assert "-tags" not in baseline
+    assert baseline[baseline.index("-l") + 1] == str(alive)
+    assert baseline[baseline.index("-severity") + 1] == "critical,high"
+
+
+def test_nuclei_normalizes_bom_target_lists(tmp_path):
+    target_list = tmp_path / "targets.txt"
+    target_list.write_text("\ufeffhttp://127.0.0.1:8765\n", encoding="utf-8")
+
+    normalized = nuclei._normalize_target_list_file(target_list, tmp_path)
+
+    assert normalized.read_bytes().startswith(b"http://127.0.0.1")
+
+
 def test_nuclei_scopes_intelligence_tags_to_matching_hosts(tmp_path):
     target = tmp_path / "example.com"
     alive = target / "probe" / "alive.txt"

@@ -14,7 +14,7 @@ import subprocess
 import re
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 from rich.console import Console
@@ -122,12 +122,30 @@ def _write_results(output_dir: Path, json_text: str) -> None:
     console.print(f"[green]Wrote nuclei results:[/] {json_file}, {jsonl_file}, and {md_file}")
 
 
+def _dedupe_jsonl_text(json_text: str) -> str:
+    """Deduplicate Nuclei JSONL findings while preserving first-seen order."""
+    findings, _ = _parse_jsonl(json_text)
+    seen: Set[Tuple[str, str, str]] = set()
+    lines: List[str] = []
+    for finding in findings:
+        key = (
+            str(finding.get("template") or ""),
+            str(finding.get("host") or finding.get("matched") or ""),
+            str(finding.get("matched-at") or finding.get("matched-at-path") or finding.get("path") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        lines.append(json.dumps(finding, sort_keys=True))
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
 def _load_detected_technologies(output: Path, target_name: str) -> List[str]:
     path = target_output_dir(output, target_name) / "technologies" / "technologies.json"
     if not path.exists():
         return []
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception:
         return []
     detected = set()
@@ -147,7 +165,7 @@ def _load_template_intelligence(output: Path, target_name: str) -> Dict[str, obj
     if not path.exists():
         return {}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
@@ -161,14 +179,14 @@ def _load_template_target_hosts(output: Path, target_name: str, selected_tags: L
     if not path.exists():
         return [], sorted(selected)
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception:
         return [], sorted(selected)
     if not isinstance(data, list):
         return [], sorted(selected)
 
-    hosts: set[str] = set()
-    mapped_tags: set[str] = set()
+    hosts: Set[str] = set()
+    mapped_tags: Set[str] = set()
     for row in data:
         if not isinstance(row, dict):
             continue
@@ -198,7 +216,7 @@ def _scope_target_list(
     if unmatched_tags or not target_hosts:
         return {"enabled": False, "reason": "selected tags were not fully mapped to target hosts"}
     target_host_set = set(target_hosts)
-    raw_targets = [line.strip() for line in target_list.read_text(encoding="utf-8").splitlines() if line.strip()]
+    raw_targets = [line.strip() for line in target_list.read_text(encoding="utf-8-sig").splitlines() if line.strip()]
     scoped_targets: List[str] = []
     for target in raw_targets:
         parsed = urlparse(target if "://" in target else f"https://{target}")
@@ -258,8 +276,17 @@ def _parse_loaded_template_count(stderr: str) -> Optional[int]:
 
 def _count_targets(target_domain: Optional[str], target_list: Optional[Path]) -> int:
     if target_list and target_list.exists():
-        return len([line for line in target_list.read_text(encoding="utf-8").splitlines() if line.strip()])
+        return len([line for line in target_list.read_text(encoding="utf-8-sig").splitlines() if line.strip()])
     return 1 if target_domain else 0
+
+
+def _normalize_target_list_file(target_list: Path, out_dir: Path) -> Path:
+    """Write a BOM-free target list for Nuclei and return its path."""
+    raw = target_list.read_text(encoding="utf-8-sig")
+    targets = [line.strip() for line in raw.splitlines() if line.strip()]
+    normalized = out_dir / "targets_normalized.txt"
+    normalized.write_text("\n".join(targets) + ("\n" if targets else ""), encoding="utf-8")
+    return normalized
 
 
 def _resolve_target_file(domain: Optional[str], list_file: Optional[Path], output: Path) -> Tuple[Optional[str], Optional[Path], str]:
@@ -271,7 +298,7 @@ def _resolve_target_file(domain: Optional[str], list_file: Optional[Path], outpu
     safe_domain = normalize_target(domain)
     alive_file = target_output_dir(output, safe_domain) / "probe" / "alive.txt"
     if alive_file.exists():
-        alive_text = alive_file.read_text(encoding="utf-8")
+        alive_text = alive_file.read_text(encoding="utf-8-sig")
         if not alive_text.strip():
             return None, alive_file, safe_domain
         urls = deduplicate_alive_urls(alive_text.splitlines())
@@ -320,6 +347,23 @@ def _remove_flag_with_value(cmd: List[str], flag: str) -> List[str]:
     return cleaned
 
 
+def _replace_flag_value(cmd: List[str], flag: str, value: str) -> List[str]:
+    cleaned = _remove_flag_with_value(cmd, flag)
+    cleaned += [flag, value]
+    return cleaned
+
+
+def _baseline_target_command(base_cmd: List[str], target_domain: Optional[str], target_list: Optional[Path]) -> List[str]:
+    cmd = _remove_flag_with_value(base_cmd, "-tags")
+    cmd = _remove_flag_with_value(cmd, "-u")
+    cmd = _remove_flag_with_value(cmd, "-l")
+    if target_list:
+        cmd += ["-l", str(target_list)]
+    elif target_domain:
+        cmd += ["-u", str(target_domain)]
+    return cmd
+
+
 def _default_template_dir() -> Path:
     home = Path(os.path.expanduser("~"))
     return home / "nuclei-templates"
@@ -366,8 +410,8 @@ def _run_nuclei_process(cmd: List[str], timeout: int, out_dir: Path, template_to
             timeout_detail = f" timeout={format_duration(timeout)}" if enforce_timeout and timeout > 0 else " timeout=monitor-only"
             reporter.update(completed_estimate, detail=f"targets={target_count}{timeout_detail}")
             time.sleep(1)
-    stdout = stdout_path.read_text(encoding="utf-8") if stdout_path.exists() else ""
-    stderr = stderr_path.read_text(encoding="utf-8") if stderr_path.exists() else ""
+    stdout = stdout_path.read_text(encoding="utf-8-sig") if stdout_path.exists() else ""
+    stderr = stderr_path.read_text(encoding="utf-8-sig") if stderr_path.exists() else ""
     stdout_path.unlink(missing_ok=True)
     stderr_path.unlink(missing_ok=True)
     reporter.update(template_total or 1, total=template_total or 1, detail=f"targets={target_count}", force=True)
@@ -427,11 +471,15 @@ def run(
 
     cmd: List[str] = ["nuclei"]
     if target_list:
-        if not target_list.exists() or not target_list.read_text(encoding="utf-8").strip():
+        if not target_list.exists() or not target_list.read_text(encoding="utf-8-sig").strip():
             skip("Nuclei module skipped")
             info("Reason: no alive targets")
             log.warning("No nuclei targets found")
             return skipped_result("No alive targets")
+        normalized_target_list = _normalize_target_list_file(target_list, out_dir)
+        if original_target_list == target_list:
+            original_target_list = normalized_target_list
+        target_list = normalized_target_list
         cmd += ["-l", str(target_list)]
     else:
         cmd += ["-u", str(target_domain)]
@@ -515,7 +563,7 @@ def run(
     target_count = _count_targets(target_domain, target_list)
     target_ceiling = get_profiled_ceiling("nuclei_targets", 250, profile, config)
     if target_list and target_ceiling and target_count > target_ceiling:
-        raw_targets = [line.strip() for line in target_list.read_text(encoding="utf-8").splitlines() if line.strip()]
+        raw_targets = [line.strip() for line in target_list.read_text(encoding="utf-8-sig").splitlines() if line.strip()]
         capped_file = out_dir / "targets_capped.txt"
         capped_file.write_text("\n".join(raw_targets[:target_ceiling]) + "\n", encoding="utf-8")
         warn(f"Nuclei targets capped at {target_ceiling} of {target_count} by active safety profile")
@@ -523,6 +571,22 @@ def run(
         cmd += ["-l", str(capped_file)]
         target_list = capped_file
         target_count = target_ceiling
+    baseline_enabled = bool(config_get(config, "nuclei.baseline_scan.enabled", True))
+    baseline_severity = str(config_get(config, "nuclei.baseline_scan.severity", "critical,high") or "critical,high")
+    baseline_target_domain = original_target_domain
+    baseline_target_list = original_target_list
+    baseline_target_count = _count_targets(baseline_target_domain, baseline_target_list)
+    if baseline_target_list and target_ceiling and baseline_target_count > target_ceiling:
+        raw_targets = [line.strip() for line in baseline_target_list.read_text(encoding="utf-8-sig").splitlines() if line.strip()]
+        baseline_capped_file = out_dir / "baseline_targets_capped.txt"
+        baseline_capped_file.write_text("\n".join(raw_targets[:target_ceiling]) + "\n", encoding="utf-8")
+        baseline_target_list = baseline_capped_file
+        baseline_target_domain = None
+        baseline_target_count = target_ceiling
+    baseline_needed = baseline_enabled and bool(selected_tags) and not explicit_templates
+    baseline_cmd = _baseline_target_command(cmd, baseline_target_domain, baseline_target_list)
+    baseline_cmd = _replace_flag_value(baseline_cmd, "-severity", baseline_severity)
+    baseline_template_candidates = _count_matching_templates(baseline_cmd, timeout=min(module_timeout or 60, 60)) if baseline_needed else None
     template_candidates = _count_matching_templates(cmd, timeout=min(module_timeout or 60, 60))
     tag_fallback_reason = ""
     if selected_tags and not explicit_templates and template_candidates == 0:
@@ -545,6 +609,7 @@ def run(
             cmd += ["-as"]
         selection_reason = "intelligence tags unavailable; fallback to automatic scan" if automatic_scan else f"intelligence tags unavailable; fallback to profile {profile}"
         template_candidates = _count_matching_templates(cmd, timeout=min(module_timeout or 60, 60))
+        baseline_needed = False
     info(f"Running nuclei profile={profile} severity={resolved_severity} targets={target_name}" + (" automatic-scan=on" if automatic_scan else ""))
     info(f"Template selection reason: {selection_reason}")
     if detected_technologies:
@@ -554,9 +619,18 @@ def run(
     info(f"Nuclei targets: {target_count}")
     if template_candidates is not None:
         info(f"Nuclei matching templates before execution: {template_candidates}")
+    if baseline_needed:
+        info(f"Baseline Nuclei safety net: severity={baseline_severity} targets={baseline_target_count}")
+        if baseline_template_candidates is not None:
+            info(f"Baseline matching templates before execution: {baseline_template_candidates}")
     log.info("Running command: %s", " ".join(cmd))
 
     try:
+        baseline_status = "not_applicable"
+        baseline_stdout = ""
+        baseline_stderr = ""
+        baseline_templates_executed: Optional[int] = None
+        baseline_duration = 0.0
         with log_duration(log, "nuclei"):
             proc = _run_nuclei_process(cmd, module_timeout, out_dir, template_candidates, target_count, enforce_timeout=enforce_module_timeout, progress_interval=progress_interval)
 
@@ -602,6 +676,7 @@ def run(
                 cmd += ["-as"]
             selection_reason = "intelligence tags failed; fallback to automatic scan" if automatic_scan else f"intelligence tags failed; fallback to profile {profile}"
             template_candidates = _count_matching_templates(cmd, timeout=min(module_timeout or 60, 60))
+            baseline_needed = False
             with log_duration(log, "nuclei tag fallback retry"):
                 proc = _run_nuclei_process(cmd, module_timeout, out_dir, template_candidates, target_count, enforce_timeout=enforce_module_timeout, progress_interval=progress_interval)
             stdout = proc.stdout or ""
@@ -612,6 +687,30 @@ def run(
             warn(f"nuclei failed (exit code {proc.returncode})")
             console.print(stderr)
             return ModuleResult(status="failed", reason=f"exit code {proc.returncode}")
+
+        if baseline_needed:
+            baseline_started = time.perf_counter()
+            baseline_status = "completed"
+            try:
+                with log_duration(log, "nuclei baseline"):
+                    baseline_proc = _run_nuclei_process(baseline_cmd, module_timeout, out_dir, baseline_template_candidates, baseline_target_count, enforce_timeout=enforce_module_timeout, progress_interval=progress_interval)
+                baseline_stdout = baseline_proc.stdout or ""
+                baseline_stderr = _clean_nuclei_output(baseline_proc.stderr or "")
+                baseline_templates_executed = _parse_loaded_template_count(baseline_stderr) or baseline_template_candidates
+                if baseline_proc.returncode != 0 and not baseline_stdout.strip():
+                    baseline_status = "failed"
+                    log.warning("nuclei baseline failed with exit code %s: %s", baseline_proc.returncode, baseline_stderr.strip())
+            except subprocess.TimeoutExpired:
+                baseline_status = "timed_out"
+                log.warning("nuclei baseline timed out")
+            except Exception as exc:
+                baseline_status = "failed"
+                log.warning("nuclei baseline failed: %s", exc)
+            baseline_duration = time.perf_counter() - baseline_started
+            if baseline_stdout.strip():
+                stdout = _dedupe_jsonl_text("\n".join(part for part in (stdout, baseline_stdout) if part.strip()))
+            if baseline_stderr.strip():
+                stderr = "\n".join(part for part in (stderr, baseline_stderr) if part.strip())
 
         # Write outputs
         _write_results(out_dir, stdout)
@@ -638,11 +737,22 @@ def run(
                 "selected_tags_requested": selected_tags_requested,
                 "selected_tags": selected_tags,
                 "selection_reason": selection_reason,
+                "coverage_strategy": "smart_tags_plus_lightweight_baseline" if baseline_needed else selection_reason,
                 "tag_fallback_reason": tag_fallback_reason,
                 "target_scope": target_scope,
                 "template_candidates": template_candidates,
                 "templates_executed": templates_executed,
                 "templates_skipped": templates_skipped,
+                "baseline_scan": {
+                    "enabled": baseline_enabled,
+                    "applied": baseline_needed,
+                    "status": baseline_status,
+                    "severity": baseline_severity,
+                    "template_candidates": baseline_template_candidates,
+                    "templates_executed": baseline_templates_executed,
+                    "targets_count": baseline_target_count if baseline_needed else 0,
+                    "duration_seconds": round(baseline_duration, 2),
+                },
                 "targets_count": target_count,
                 "target_ceiling": target_ceiling,
                 "rate_limit": resolved_rate,
@@ -668,6 +778,7 @@ def run(
                 "Profile": profile,
                 "Automatic Scan": "on" if automatic_scan else "off",
                 "Selection Reason": selection_reason,
+                "Coverage Strategy": "Smart + baseline" if baseline_needed else selection_reason,
                 "Templates Matched": template_candidates if template_candidates is not None else "Unknown",
                 "Templates Executed": templates_executed if templates_executed is not None else "Not Run",
                 "Templates Skipped": templates_skipped if templates_skipped is not None else "Not Run",
@@ -709,9 +820,20 @@ def run(
                 "selected_tags_requested": selected_tags_requested,
                 "selected_tags": selected_tags,
                 "selection_reason": selection_reason,
+                "coverage_strategy": "smart_tags_plus_lightweight_baseline" if "baseline_needed" in locals() and baseline_needed else selection_reason,
                 "tag_fallback_reason": tag_fallback_reason,
                 "target_scope": target_scope if "target_scope" in locals() else None,
                 "template_candidates": template_candidates if "template_candidates" in locals() else None,
+                "baseline_scan": {
+                    "enabled": baseline_enabled if "baseline_enabled" in locals() else bool(config_get(config, "nuclei.baseline_scan.enabled", True)),
+                    "applied": baseline_needed if "baseline_needed" in locals() else False,
+                    "status": "timed_out" if "baseline_needed" in locals() and baseline_needed else "not_applicable",
+                    "severity": baseline_severity if "baseline_severity" in locals() else str(config_get(config, "nuclei.baseline_scan.severity", "critical,high") or "critical,high"),
+                    "template_candidates": baseline_template_candidates if "baseline_template_candidates" in locals() else None,
+                    "templates_executed": None,
+                    "targets_count": baseline_target_count if "baseline_target_count" in locals() and baseline_needed else 0,
+                    "duration_seconds": 0,
+                },
                 "targets_count": target_count if "target_count" in locals() else None,
                 "rate_limit": resolved_rate,
                 "concurrency": resolved_concurrency,

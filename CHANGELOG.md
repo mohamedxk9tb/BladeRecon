@@ -3,6 +3,9 @@
 ## 0.2.0 - 2026-05-29
 
 - Added Advanced Recon intelligence with historical URL collection, historical endpoint/parameter extraction, historical attack-surface correlation, historical JavaScript analysis, low-noise content discovery, security-header asset discovery, and asset prioritization.
+- Refined Smart Nuclei to pair technology-tag selection with a lightweight `critical,high` baseline safety net and report the coverage strategy in metadata and reports.
+- Improved asset-priority explainability with per-signal scoring details, strongest factors, confidence labels, historical/live distinctions, and clearer report presentation.
+- Fixed release-candidate validation issues around custom Nuclei template directories, UTF-8 BOM target lists/artifacts, Nuclei Not Run summary labels, and estimated request metrics.
 - Added `advanced` CLI command and integrated it into the full workflow before screenshots and Nuclei.
 - Added report sections for Advanced Recon Intelligence, Top Priority Assets, Historical Attack Surface, Interesting Paths, Security Header Assets, and quality-control ratios.
 - Added professional Rich CLI branding, status language, summaries, cache commands, resume flow, and version reporting.
