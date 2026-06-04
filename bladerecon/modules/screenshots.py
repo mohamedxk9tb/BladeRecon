@@ -32,6 +32,10 @@ class ScreenshotRunStats:
     failed: int = 0
     skipped: int = 0
     failures: List[Tuple[str, str]] = field(default_factory=list)
+    target_timings: List[Dict[str, object]] = field(default_factory=list)
+    slow_targets: List[Dict[str, object]] = field(default_factory=list)
+    timeout_targets: List[str] = field(default_factory=list)
+    average_capture_time: float = 0.0
 
 
 def _normalize_filename(url: str) -> str:
@@ -108,6 +112,9 @@ async def _worker(
     limiter: Optional[AsyncRateLimiter] = None,
     host_sems: Optional[Dict[str, asyncio.Semaphore]] = None,
     per_host_limit: int = 1,
+    max_attempts: int = 1,
+    timings: Optional[List[Dict[str, object]]] = None,
+    slow_threshold: float = 10.0,
 ) -> None:
     while True:
         url = await queue.get()
@@ -117,9 +124,12 @@ async def _worker(
 
         filename = _normalize_filename(url) + ".png"
         out_path = dest / filename
+        started = time.perf_counter()
+        status = "failed"
+        reason = ""
         try:
             last_error: Optional[Exception] = None
-            for _ in range(2):
+            for _ in range(max(1, max_attempts)):
                 page = None
                 try:
                     if host_sems is None:
@@ -134,6 +144,8 @@ async def _worker(
                     break
                 except Exception as exc:
                     last_error = exc
+                    if "timeout" in str(exc).lower():
+                        break
                 finally:
                     if page:
                         try:
@@ -143,11 +155,15 @@ async def _worker(
             if last_error:
                 raise last_error
             captured.append(url)
+            status = "captured"
         except Exception as exc:
             reason = str(exc).split(":", 1)[0].strip() or "Screenshot failed"
             failed.append((url, reason))
             console.log(f"[yellow]{exc}[/]")
         finally:
+            elapsed = time.perf_counter() - started
+            if timings is not None:
+                timings.append({"url": url, "status": status, "reason": reason, "duration_seconds": round(elapsed, 2)})
             if reporter:
                 reporter.update(len(captured) + len(failed), detail=f"captured={len(captured)} failed={len(failed)}")
             queue.task_done()
@@ -167,6 +183,8 @@ async def _run_screenshots(urls: Iterable[str], dest: Path, concurrency: int = 1
     cfg = config or load_config()
     per_host_limit = get_profiled_per_host_concurrency("screenshots", 1, profile, cfg)
     limiter = AsyncRateLimiter(get_profiled_rate_limit("screenshots", 1, profile, cfg))
+    max_attempts = max(1, int(config_get(cfg, "screenshots.retries", 0) or 0) + 1)
+    slow_threshold = float(config_get(cfg, "screenshots.slow_target_threshold", 10) or 10)
     host_sems: Dict[str, asyncio.Semaphore] = {}
     try:
         from playwright.async_api import async_playwright
@@ -184,13 +202,14 @@ async def _run_screenshots(urls: Iterable[str], dest: Path, concurrency: int = 1
         queue: asyncio.Queue = asyncio.Queue()
         captured: List[str] = []
         failed: List[Tuple[str, str]] = []
+        timings: List[Dict[str, object]] = []
         reporter = ProgressReporter("Screenshots", total=len(urls), interval=10)
-        reporter.update(0, detail=f"profile={profile} concurrency={concurrency} per_host={per_host_limit} rps={limiter.rate_per_second:g}", force=True)
+        reporter.update(0, detail=f"profile={profile} concurrency={concurrency} attempts={max_attempts} per_host={per_host_limit} rps={limiter.rate_per_second:g}", force=True)
         for url in urls:
             await queue.put(url)
 
         tasks = [
-            asyncio.create_task(_worker(browser, queue, dest, full_page, timeout, captured, failed, reporter, limiter, host_sems, per_host_limit))
+            asyncio.create_task(_worker(browser, queue, dest, full_page, timeout, captured, failed, reporter, limiter, host_sems, per_host_limit, max_attempts, timings, slow_threshold))
             for _ in range(concurrency)
         ]
 
@@ -212,6 +231,11 @@ async def _run_screenshots(urls: Iterable[str], dest: Path, concurrency: int = 1
         stats.captured = len(captured)
         stats.failed = len(deduped_failures)
         stats.failures = list(deduped_failures.items())
+        stats.target_timings = sorted(timings, key=lambda item: float(item.get("duration_seconds") or 0), reverse=True)
+        stats.slow_targets = [item for item in stats.target_timings if float(item.get("duration_seconds") or 0) >= slow_threshold]
+        stats.timeout_targets = [str(item.get("url") or "") for item in stats.target_timings if "timeout" in str(item.get("reason") or "").lower()]
+        if timings:
+            stats.average_capture_time = round(sum(float(item.get("duration_seconds") or 0) for item in timings) / len(timings), 2)
 
         await browser.close()
     return stats
@@ -266,6 +290,8 @@ def _filter_screenshot_targets(urls: List[str], target_dir: Path, config: dict) 
         length = int(row.get("content_length") or 0)
         status = int(row.get("status_code") or 0)
         if status in {301, 302, 303, 307, 308}:
+            continue
+        if status >= 500:
             continue
         if title and any(token in title for token in placeholders):
             continue
@@ -396,6 +422,11 @@ def run(domain: Optional[str] = None, list_file: Optional[Path] = None, output: 
                 "rate_limit_per_second": get_profiled_rate_limit("screenshots", 1, active_profile, config),
                 "request_ceiling": profile_ceiling,
                 "timeout": timeout,
+                "retries": int(config_get(config, "screenshots.retries", 0) or 0),
+                "average_capture_time": stats.average_capture_time,
+                "slow_targets": stats.slow_targets[:10],
+                "timeout_targets": stats.timeout_targets,
+                "target_timings": stats.target_timings,
             },
         )
         failure_reasons: Dict[str, int] = {}

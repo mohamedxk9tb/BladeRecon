@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Pattern, Tuple
 
-from .utils import info, log_duration, prepare_module_output, print_module_summary, setup_logging, success, target_output_dir, warn, write_json
+from .utils import atomic_write_text, info, log_duration, prepare_module_output, print_module_summary, setup_logging, success, target_output_dir, warn, write_json
 
 SECRET_PATTERNS: Tuple[Tuple[str, Pattern[str]], ...] = (
     ("Private Key", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----")),
@@ -64,6 +64,17 @@ def _load_js_rows(target_dir: Path) -> List[dict]:
         return []
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _load_historical_secret_rows(target_dir: Path) -> List[dict]:
+    path = target_dir / "historical_js" / "secrets.json"
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
         return data if isinstance(data, list) else []
     except Exception:
         return []
@@ -126,8 +137,33 @@ def run(domain: str, output: Path = Path("results"), resume: bool = False) -> Li
                     continue
                 seen.add(key)
                 findings.append({**finding, "source": source_url})
+        for row in _load_historical_secret_rows(target_dir):
+            if not isinstance(row, dict):
+                continue
+            secret_type = str(row.get("type") or "")
+            value = str(row.get("value") or "")
+            source_url = str(row.get("source") or "historical_js")
+            if not secret_type or not value:
+                continue
+            key = (secret_type, value, source_url)
+            if key in seen:
+                continue
+            seen.add(key)
+            confidence = str(row.get("confidence") or _secret_confidence(secret_type))
+            findings.append(
+                {
+                    "type": secret_type,
+                    "value": value,
+                    "value_preview": str(row.get("value_preview") or _value_preview(value)),
+                    "confidence": confidence,
+                    "risk": str(row.get("risk") or _secret_risk(secret_type, confidence)),
+                    "source": source_url,
+                    "source_type": "historical_js",
+                }
+            )
 
-    (out_dir / "secrets.txt").write_text(
+    atomic_write_text(
+        out_dir / "secrets.txt",
         "\n".join(
             f"{item['type']} [{item.get('confidence', 'LOW')}]: {item.get('value_preview') or item['value']} ({item['source']})"
             for item in findings
@@ -135,6 +171,14 @@ def run(domain: str, output: Path = Path("results"), resume: bool = False) -> Li
         encoding="utf-8",
     )
     write_json(out_dir / "secrets.json", findings)
+    write_json(
+        out_dir / "metadata.json",
+        {
+            "js_files": len(rows),
+            "historical_js_secret_rows": len(_load_historical_secret_rows(target_dir)),
+            "findings": len(findings),
+        },
+    )
 
     success(f"Secrets detected: {len(findings)}")
     print_module_summary(

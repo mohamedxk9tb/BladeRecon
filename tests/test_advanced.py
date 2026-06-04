@@ -85,7 +85,28 @@ def test_content_signal_scores_noise_lower_than_admin_paths() -> None:
     admin = advanced._content_signal("/admin", 200)
     test_path = advanced._content_signal("/test", 200)
     forbidden = advanced._content_signal("/debug", 403)
+    graphql = advanced._content_signal("/graphql", 200)
 
     assert admin["level"] == "High"
     assert test_path["level"] == "Low"
     assert forbidden["score"] >= 45
+    assert graphql["level"] == "High"
+
+
+def test_historical_source_roi_reports_signal_per_source() -> None:
+    roi = advanced._historical_source_roi(
+        [
+            {"url": "https://api.example.com/api/v1/users?id=1", "sources": ["commoncrawl", "wayback"]},
+            {"url": "https://www.example.com/about", "sources": ["wayback"]},
+        ],
+        [
+            {"source": "commoncrawl", "duration_seconds": 2.0, "requests_sent": 1},
+            {"source": "wayback", "duration_seconds": 10.0, "requests_sent": 1},
+        ],
+    )
+
+    by_source = {row["source"]: row for row in roi}
+    assert by_source["commoncrawl"]["opportunity_candidates"] == 1
+    assert by_source["commoncrawl"]["opportunities_per_second"] == 0.5
+    assert by_source["wayback"]["selected_urls"] == 2
+    assert by_source["wayback"]["signal_to_noise_ratio"] == 0.5

@@ -1,9 +1,24 @@
+import io
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
 
 from bladerecon.modules import utils
+
+
+def test_status_falls_back_when_console_write_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    fallback = io.StringIO()
+
+    def broken_print(*args, **kwargs):
+        raise OSError(22, "Invalid argument")
+
+    monkeypatch.setattr(utils.console, "print", broken_print)
+    monkeypatch.setattr(utils.sys, "__stdout__", fallback)
+
+    utils.status("INFO", "hello")
+
+    assert "[INFO] hello" in fallback.getvalue()
 
 
 def test_wordlist_loading_ignores_comments_empty_and_duplicates(tmp_path: Path) -> None:

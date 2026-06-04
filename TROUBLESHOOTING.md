@@ -89,7 +89,7 @@ Nuclei Status: Timed Out
 Reason: timeout after <seconds>s
 ```
 
-By default BladeRecon does not force-kill Nuclei with a module wall-clock timeout. If you pass `--timeout`, or enable `nuclei.enforce_module_timeout` in `config.yaml`, timed-out scans are reported clearly in `metadata.json`, `scan_state.json`, and the report.
+BladeRecon reports timed-out Nuclei runs clearly in `metadata.json`, `scan_state.json`, and the report. The packaged configuration enables `nuclei.enforce_module_timeout` with a 300 second module timeout; you can raise it with `--timeout` for large, justified scans.
 
 For large targets, prefer:
 
@@ -97,16 +97,30 @@ For large targets, prefer:
 bladerecon nuclei example.com --profile safe --timeout 900
 ```
 
-If you do not want a wall-clock limit, omit `--timeout`.
+If you do not want a wall-clock limit, disable `nuclei.enforce_module_timeout` in `config.yaml`.
+
+## Nuclei Baseline Is Skipped
+
+When there are no selected intelligence tags, no validated attack surface, and
+no high-confidence opportunities, BladeRecon skips baseline-only Nuclei. This is
+intentional: a large tag-free scan with no opportunity evidence can consume
+runtime without realistic bug bounty value. The report and `nuclei/metadata.json`
+show `coverage_strategy: skipped_low_roi_baseline` and the `roi_decision`.
+
+If opportunity evidence exists but only for a small number of hosts,
+baseline-only Nuclei is scoped to those hosts and records the decision in
+`target_scope`. If the opportunity hosts are stale and no longer appear in the
+current alive target list, BladeRecon skips the baseline instead of expanding
+back to every alive host.
 
 ## Nuclei Runs A Baseline After Smart Tags
 
-When Smart Nuclei selects technology tags, BladeRecon also runs a small
+When Smart Nuclei selects technology tags, BladeRecon can also run a small
 tag-free baseline scan for `critical,high` severities. This is intentional: the
 smart pass stays fast, while the baseline reduces the chance of missing an
 important template outside the selected tags. The report and
 `nuclei/metadata.json` show whether the baseline was applied, completed, failed,
-or timed out.
+skipped by ROI, or timed out.
 
 ## Custom Nuclei Templates Are Rejected
 
@@ -156,6 +170,13 @@ Possible causes:
 - CSP/security headers did not reference additional assets.
 - Content discovery filtered generic 404/soft-404 responses.
 - Historical JS references were absent or unavailable.
+
+## Live JavaScript Is Blocked Or 403
+
+If live HTML or JS assets are blocked, BladeRecon can reuse historical JavaScript
+references collected by Advanced Recon. Those historical JS artifacts feed the
+same endpoint and secret extraction flow, so blocked live pages do not collapse
+the JavaScript surface to zero when historical artifacts exist.
 
 ## Go Missing
 

@@ -4,6 +4,68 @@ from pathlib import Path
 from bladerecon.modules import report
 
 
+def test_asset_data_uri_skips_large_embedded_assets(tmp_path: Path) -> None:
+    large = tmp_path / "large.png"
+    large.write_bytes(b"x" * 2_600_000)
+
+    assert report._asset_data_uri(large) == ""
+
+
+def test_investigation_campaigns_group_api_opportunities_without_noise() -> None:
+    targets = [
+        {
+            "target": "api.example.com",
+            "type": "GraphQL",
+            "opportunity_types": ["GraphQL", "API", "Authentication"],
+            "score": 96,
+            "confidence": "Very High",
+            "validation_strength": "Strong",
+            "positive_validation_signals": ["GraphQL access observed in endpoint artifacts", "High Nuclei finding"],
+            "negative_validation_signals": ["No modern equivalent missing"],
+            "correlation_strength": 6,
+            "evidence_summary": ["GraphQL endpoint evidence", "Authentication surface nearby"],
+            "evidence": [
+                {"type": "GraphQL", "value": "https://api.example.com/graphql", "source": "endpoint", "reason": "GraphQL endpoint discovered"},
+                {"type": "Authentication", "value": "https://api.example.com/auth/login", "source": "endpoint", "reason": "Authentication endpoint discovered"},
+            ],
+        },
+        {
+            "target": "docs.example.com",
+            "type": "API",
+            "opportunity_types": ["API", "Parameters"],
+            "score": 88,
+            "confidence": "High",
+            "validation_strength": "Moderate",
+            "positive_validation_signals": ["OpenAPI/Swagger access confirmed"],
+            "negative_validation_signals": ["No Nuclei validation findings for this host"],
+            "correlation_strength": 4,
+            "evidence_summary": ["API/OpenAPI exposure evidence", "Sensitive parameter names observed"],
+            "evidence": [
+                {"type": "API", "value": "https://docs.example.com/swagger", "source": "endpoint", "reason": "API documentation discovered"},
+                {"type": "Parameters", "value": "redirect_url", "source": "parameters", "reason": "Risky parameter names observed"},
+            ],
+        },
+        {
+            "target": "cdn.example.com",
+            "type": "Priority asset",
+            "reason": "Cloudflare CDN edge",
+            "score": 10,
+            "evidence": [],
+        },
+    ]
+
+    campaigns = report._build_investigation_campaigns(targets)
+
+    assert campaigns[0]["name"] == "API Ecosystem"
+    assert campaigns[0]["opportunity_count"] == 2
+    assert campaigns[0]["confidence"] == "Very High"
+    assert campaigns[0]["average_confidence"] == "High"
+    assert campaigns[0]["validation_strength"] in {"Moderate", "Strong"}
+    assert "High Nuclei finding" in campaigns[0]["positive_validation_signals"]
+    assert "No Nuclei validation findings for this host" in campaigns[0]["negative_validation_signals"]
+    assert not any(item["name"] == "Infrastructure" for item in campaigns)
+
+
 def test_report_rendering_with_minimal_outputs(tmp_path: Path) -> None:
     target = tmp_path / "example.com"
     (target / "subdomains").mkdir(parents=True)
@@ -79,6 +141,80 @@ def test_report_rendering_with_minimal_outputs(tmp_path: Path) -> None:
         '{"templates_available":123,"selected_tags":["nginx","php"],"selected":[{"reason":"PHP","tags":["php"]}]}',
         encoding="utf-8",
     )
+    (target / "intelligence" / "opportunity_priorities.json").write_text(
+        json.dumps(
+            [
+                {
+                    "host": "www.example.com",
+                    "opportunity_type": "Admin",
+                    "opportunity_types": ["Admin", "API", "Parameters"],
+                    "score": 92,
+                    "priority": "Critical Investigation",
+                    "confidence": "Very High",
+                    "validation_strength": "Moderate",
+                    "validation_score": 3,
+                    "positive_validation_signals": ["Interesting response pattern observed (403)"],
+                    "negative_validation_signals": ["No Nuclei validation findings for this host"],
+                    "indicator_count": 4,
+                    "evidence_diversity": 3,
+                    "correlation_strength": 5,
+                    "evidence_summary": ["Administrative surface evidence", "API/OpenAPI exposure evidence", "Sensitive parameter names observed"],
+                    "priority_reason": "API exposure combines with risky parameters, increasing the likelihood of IDOR, redirect, traversal, or authorization findings.",
+                    "suggested_testing": "Access control, endpoint authorization, IDOR testing",
+                    "evidence": [
+                        {"type": "Admin", "value": "https://www.example.com/admin", "score": 55, "reason": "Focused content discovery found administrative surface"}
+                    ],
+                }
+                ,
+                {
+                    "host": "api.example.com",
+                    "opportunity_type": "GraphQL",
+                    "opportunity_types": ["GraphQL", "API", "Authentication", "Parameters"],
+                    "score": 96,
+                    "priority": "Critical Investigation",
+                    "confidence": "Very High",
+                    "validation_strength": "Strong",
+                    "validation_score": 7,
+                    "positive_validation_signals": ["GraphQL access observed in endpoint artifacts", "Auth-related endpoint discovered"],
+                    "negative_validation_signals": ["No Nuclei validation findings for this host"],
+                    "indicator_count": 5,
+                    "evidence_diversity": 4,
+                    "correlation_strength": 6,
+                    "evidence_summary": ["GraphQL endpoint evidence", "Authentication surface nearby", "Sensitive parameter names observed"],
+                    "priority_reason": "Multiple independent observations support manual investigation.",
+                    "suggested_testing": "Introspection, authorization testing, IDOR testing",
+                    "evidence": [
+                        {"type": "GraphQL", "value": "https://api.example.com/graphql", "score": 65, "reason": "GraphQL endpoint discovered", "source": "endpoint"},
+                        {"type": "Authentication", "value": "https://api.example.com/auth/login", "score": 35, "reason": "Authentication endpoint discovered", "source": "endpoint"},
+                        {"type": "Parameters", "value": "redirect_url, id", "score": 20, "reason": "Risky parameter names observed", "source": "parameters"}
+                    ],
+                },
+                {
+                    "host": "docs.example.com",
+                    "opportunity_type": "API",
+                    "opportunity_types": ["API", "Parameters"],
+                    "score": 88,
+                    "priority": "High Investigation",
+                    "confidence": "High",
+                    "validation_strength": "Moderate",
+                    "validation_score": 4,
+                    "positive_validation_signals": ["OpenAPI/Swagger access confirmed"],
+                    "negative_validation_signals": [],
+                    "indicator_count": 3,
+                    "evidence_diversity": 3,
+                    "correlation_strength": 4,
+                    "evidence_summary": ["API/OpenAPI exposure evidence", "Sensitive parameter names observed"],
+                    "priority_reason": "API exposure combines with risky parameters.",
+                    "suggested_testing": "Authorization testing, version diffing, parameter tampering",
+                    "evidence": [
+                        {"type": "API", "value": "https://docs.example.com/swagger", "score": 55, "reason": "API documentation discovered", "source": "endpoint"},
+                        {"type": "API", "value": "https://docs.example.com/openapi.json", "score": 24, "reason": "OpenAPI path returned actionable response", "source": "content_response"}
+                    ],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
     (target / "historical").mkdir()
     (target / "historical" / "urls.json").write_text('[{"url":"https://www.example.com/old","sources":["wayback"]}]', encoding="utf-8")
     (target / "historical" / "endpoints.json").write_text('[{"endpoint":"https://www.example.com/api/v1/users"}]', encoding="utf-8")
@@ -107,7 +243,16 @@ def test_report_rendering_with_minimal_outputs(tmp_path: Path) -> None:
     assert "Technology Overview" in html
     assert "Recon Intelligence" in html
     assert "Advanced Recon Intelligence" in html
-    assert "Suggested Next Targets" in html
+    assert "Top Investigation Targets" in html
+    assert "Top Investigation Campaigns" in html
+    assert "API Ecosystem" in html
+    assert "Authorization testing, IDOR, version diffing" in html
+    assert "Critical Investigation" in html
+    assert "Very High confidence" in html
+    assert "Strong validation" in html
+    assert "GraphQL access observed in endpoint artifacts" in html
+    assert "Evidence sources" in html
+    assert "Access control, endpoint authorization, IDOR testing" in html
     assert "High confidence" in html
     assert "Coverage strategy: smart_tags_plus_lightweight_baseline" in html
     assert "Risk Score" in html
@@ -158,7 +303,11 @@ def test_report_rendering_with_minimal_outputs(tmp_path: Path) -> None:
     assert "### Top Slowest Modules" in md
     assert "### Top RAM Consumers" in md
     assert "### Top Priority Assets" in md
-    assert "### Suggested Next Investigation Targets" in md
+    assert "## Top Investigation Targets" in md
+    assert "## Top Investigation Campaigns" in md
+    assert "API Ecosystem" in md
+    assert "Critical Investigation" in md
+    assert "Very High" in md
     assert "- Coverage strategy: smart_tags_plus_lightweight_baseline" in md
     assert "| Probe | Completed | 1.25s | 80.0 MB | 70.0 MB |" in md
     assert "| Nginx 1.30.1 | High |" in md

@@ -169,6 +169,97 @@ def _load_template_intelligence(output: Path, target_name: str) -> Dict[str, obj
         return {}
 
 
+def _read_json_file(path: Path, default: object) -> object:
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return default
+
+
+def _nuclei_roi_decision(output: Path, target_name: str, baseline_only: bool, selected_tags: List[str], explicit_templates: bool, automatic_scan: bool) -> Dict[str, object]:
+    """Decide whether a baseline-only Nuclei run has enough opportunity evidence."""
+    def to_int(value: object) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    if explicit_templates:
+        return {"run": True, "reason": "explicit templates supplied"}
+    if selected_tags:
+        return {"run": True, "reason": "high-confidence intelligence tags selected"}
+    if automatic_scan:
+        return {"run": True, "reason": "automatic scan enabled"}
+    if not baseline_only:
+        return {"run": True, "reason": "non-baseline execution"}
+
+    target_dir = target_output_dir(output, target_name)
+    opportunities = _read_json_file(target_dir / "intelligence" / "opportunity_priorities.json", [])
+    high_confidence = []
+    validated = []
+    if isinstance(opportunities, list):
+        for item in opportunities:
+            if not isinstance(item, dict):
+                continue
+            confidence = str(item.get("confidence") or "").lower()
+            score = to_int(item.get("score"))
+            validation_strength = str(item.get("validation_strength") or "").lower()
+            positive = item.get("positive_validation_signals")
+            if confidence == "high" and score >= 70:
+                high_confidence.append(item)
+            strong_positive = False
+            if isinstance(positive, list):
+                positive_text = " ".join(str(value).lower() for value in positive)
+                strong_positive = any(
+                    token in positive_text
+                    for token in (
+                        "nuclei finding",
+                        "endpoint artifacts",
+                        "returned actionable response",
+                        "access confirmed",
+                        "interesting response pattern",
+                    )
+                )
+            if validation_strength in {"moderate", "strong"} or strong_positive:
+                validated.append(item)
+
+    asset_priority = _read_json_file(target_dir / "asset_priority.json", {})
+    top_assets = asset_priority.get("top_assets", []) if isinstance(asset_priority, dict) else []
+    strong_assets = [
+        item for item in top_assets
+        if isinstance(item, dict) and to_int(item.get("score")) >= 70 and str(item.get("confidence") or "").lower() == "high"
+    ]
+
+    if high_confidence or validated or strong_assets:
+        return {
+            "run": True,
+            "reason": "baseline justified by high-confidence or validated opportunity evidence",
+            "high_confidence_opportunities": len(high_confidence),
+            "validated_opportunities": len(validated),
+            "strong_assets": len(strong_assets),
+        }
+    return {
+        "run": False,
+        "reason": "baseline-only scan skipped: no selected intelligence tags, no high-confidence opportunities, and no validated attack surface",
+        "high_confidence_opportunities": 0,
+        "validated_opportunities": 0,
+        "strong_assets": 0,
+    }
+
+
+def _write_nuclei_skip_artifacts(out_dir: Path, metadata: Dict[str, object]) -> None:
+    write_json(out_dir / "results.json", [])
+    atomic_write_text(out_dir / "results.jsonl", "", encoding="utf-8")
+    atomic_write_text(
+        out_dir / "results.md",
+        "\n".join(["# Nuclei Results", "", "Total findings: 0", "", f"Skipped: {metadata.get('skip_reason', metadata.get('reason', 'not run'))}", ""]),
+        encoding="utf-8",
+    )
+    write_json(out_dir / "metadata.json", metadata)
+
+
 def _load_template_target_hosts(output: Path, target_name: str, selected_tags: List[str]) -> Tuple[List[str], List[str]]:
     if not selected_tags:
         return [], []
@@ -233,6 +324,134 @@ def _scope_target_list(
         "host_scope": target_hosts,
         "reason": "technology-tag target scope",
     }
+
+
+def _opportunity_host(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    parsed = urlparse(text if "://" in text else f"https://{text}")
+    return (parsed.hostname or text.split("/")[0]).lower()
+
+
+def _load_roi_target_hosts(output: Path, target_name: str, max_hosts: int = 10) -> List[str]:
+    """Return hosts with enough opportunity evidence to justify baseline-only Nuclei."""
+    path = target_output_dir(output, target_name) / "intelligence" / "opportunity_priorities.json"
+    opportunities = _read_json_file(path, [])
+    if not isinstance(opportunities, list):
+        return []
+
+    def to_int(value: object) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    strength_rank = {"strong": 3, "moderate": 2, "weak": 1, "none": 0, "": 0}
+    ranked: List[Tuple[int, int, str]] = []
+    seen: Set[str] = set()
+    for item in opportunities:
+        if not isinstance(item, dict):
+            continue
+        host = _opportunity_host(item.get("target"))
+        if not host or host in seen:
+            continue
+        score = to_int(item.get("score"))
+        confidence = str(item.get("confidence") or "").lower()
+        strength = str(item.get("validation_strength") or "").lower()
+        opportunity_type = str(item.get("opportunity_type") or "").lower()
+        historical_only = opportunity_type == "historical" and strength not in {"moderate", "strong"}
+        if historical_only:
+            continue
+        if strength in {"moderate", "strong"} or (confidence == "high" and score >= 70):
+            ranked.append((score, strength_rank.get(strength, 0), host))
+            seen.add(host)
+
+    ranked.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+    asset_priority = _read_json_file(target_output_dir(output, target_name) / "asset_priority.json", {})
+    top_assets = asset_priority.get("top_assets", []) if isinstance(asset_priority, dict) else []
+    for item in top_assets if isinstance(top_assets, list) else []:
+        if not isinstance(item, dict):
+            continue
+        host = _opportunity_host(item.get("host") or item.get("url") or item.get("target"))
+        if not host or host in seen:
+            continue
+        score = to_int(item.get("score"))
+        confidence = str(item.get("confidence") or "").lower()
+        if score >= 70 and confidence == "high":
+            ranked.append((score, 1, host))
+            seen.add(host)
+
+    ranked.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+    return [host for _, _, host in ranked[:max_hosts]]
+
+
+def _scope_baseline_targets_to_roi(
+    target_domain: Optional[str],
+    target_list: Optional[Path],
+    output: Path,
+    target_name: str,
+    out_dir: Path,
+    max_hosts: int,
+) -> Tuple[Optional[str], Optional[Path], Dict[str, object]]:
+    roi_hosts = _load_roi_target_hosts(output, target_name, max_hosts=max_hosts)
+    if not roi_hosts:
+        return target_domain, target_list, {"enabled": False, "reason": "no ROI opportunity hosts"}
+    roi_host_set = set(roi_hosts)
+
+    if target_list and target_list.exists():
+        raw_targets = [line.strip() for line in target_list.read_text(encoding="utf-8-sig").splitlines() if line.strip()]
+        scoped_targets: List[str] = []
+        for target in raw_targets:
+            parsed = urlparse(target if "://" in target else f"https://{target}")
+            host = (parsed.hostname or target).lower()
+            if host in roi_host_set:
+                scoped_targets.append(target)
+        if not scoped_targets:
+            return None, target_list, {
+                "enabled": False,
+                "reason": "ROI opportunity hosts were not present in current target list",
+                "host_scope": roi_hosts,
+                "original_targets": len(raw_targets),
+                "scoped_targets": 0,
+            }
+        if len(scoped_targets) >= len(raw_targets):
+            return target_domain, target_list, {
+                "enabled": False,
+                "reason": "ROI scope did not reduce target set",
+                "host_scope": roi_hosts,
+                "original_targets": len(raw_targets),
+                "scoped_targets": len(scoped_targets),
+            }
+        scoped_file = out_dir / "opportunity_targets.txt"
+        scoped_file.write_text("\n".join(scoped_targets) + "\n", encoding="utf-8")
+        return None, scoped_file, {
+            "enabled": True,
+            "path": str(scoped_file),
+            "original_targets": len(raw_targets),
+            "scoped_targets": len(scoped_targets),
+            "host_scope": roi_hosts,
+            "reason": "opportunity ROI target scope",
+        }
+
+    if target_domain:
+        host = _opportunity_host(target_domain)
+        if host in roi_host_set:
+            return target_domain, None, {
+                "enabled": False,
+                "reason": "single target already matches ROI opportunity host",
+                "host_scope": roi_hosts,
+                "original_targets": 1,
+                "scoped_targets": 1,
+            }
+        return None, None, {
+            "enabled": False,
+            "reason": "single target did not match ROI opportunity hosts",
+            "host_scope": roi_hosts,
+            "original_targets": 1,
+            "scoped_targets": 0,
+        }
+    return target_domain, target_list, {"enabled": False, "reason": "no current nuclei targets", "host_scope": roi_hosts}
 
 
 def _count_matching_templates(base_cmd: List[str], timeout: int = 60) -> Optional[int]:
@@ -360,6 +579,107 @@ def _baseline_target_command(base_cmd: List[str], target_domain: Optional[str], 
     elif target_domain:
         cmd += ["-u", str(target_domain)]
     return cmd
+
+
+def _baseline_practicality(
+    enabled: bool,
+    selected_tags: List[str],
+    explicit_templates: bool,
+    baseline_target_count: int,
+    max_targets: int,
+) -> Tuple[bool, str]:
+    if not enabled:
+        return False, "disabled by configuration"
+    if explicit_templates:
+        return False, "explicit templates supplied"
+    if not selected_tags:
+        return False, "no intelligence tags selected"
+    if max_targets > 0 and baseline_target_count > max_targets:
+        return False, f"target count {baseline_target_count} exceeds baseline safety ceiling {max_targets}"
+    return True, "smart-tag coverage safety net"
+
+
+def _target_hosts_from_domain_or_list(target_domain: Optional[str], target_list: Optional[Path]) -> Set[str]:
+    hosts: Set[str] = set()
+    if target_list and target_list.exists():
+        for line in target_list.read_text(encoding="utf-8-sig").splitlines():
+            value = line.strip()
+            if not value:
+                continue
+            host = _opportunity_host(value)
+            if host:
+                hosts.add(host)
+    elif target_domain:
+        host = _opportunity_host(target_domain)
+        if host:
+            hosts.add(host)
+    return hosts
+
+
+def _scope_smart_baseline_targets(
+    original_target_domain: Optional[str],
+    original_target_list: Optional[Path],
+    current_target_domain: Optional[str],
+    current_target_list: Optional[Path],
+    output: Path,
+    target_name: str,
+    out_dir: Path,
+    max_hosts: int,
+) -> Tuple[Optional[str], Optional[Path], Dict[str, object]]:
+    roi_hosts = _load_roi_target_hosts(output, target_name, max_hosts=max_hosts)
+    current_hosts = _target_hosts_from_domain_or_list(current_target_domain, current_target_list)
+    original_lines: Dict[str, str] = {}
+    if original_target_list and original_target_list.exists():
+        for line in original_target_list.read_text(encoding="utf-8-sig").splitlines():
+            value = line.strip()
+            host = _opportunity_host(value)
+            if value and host:
+                original_lines.setdefault(host, value)
+    elif original_target_domain:
+        host = _opportunity_host(original_target_domain)
+        if host:
+            original_lines[host] = original_target_domain
+
+    gap_hosts = [host for host in roi_hosts if host not in current_hosts]
+    scoped_targets = [original_lines[host] for host in gap_hosts if host in original_lines]
+    if not roi_hosts:
+        return None, None, {
+            "run": False,
+            "reason": "no high-confidence or validated opportunity gap for baseline",
+            "roi_hosts": [],
+            "covered_hosts": sorted(current_hosts),
+            "gap_hosts": [],
+            "targets": [],
+        }
+    if not gap_hosts:
+        return None, None, {
+            "run": False,
+            "reason": "scoped smart scan already covers high-confidence opportunity hosts",
+            "roi_hosts": roi_hosts,
+            "covered_hosts": sorted(current_hosts),
+            "gap_hosts": [],
+            "targets": [],
+        }
+    if not scoped_targets:
+        return None, None, {
+            "run": False,
+            "reason": "baseline opportunity hosts were not present in the active target list",
+            "roi_hosts": roi_hosts,
+            "covered_hosts": sorted(current_hosts),
+            "gap_hosts": gap_hosts,
+            "targets": [],
+        }
+    scoped_file = out_dir / "baseline_opportunity_targets.txt"
+    scoped_file.write_text("\n".join(scoped_targets) + "\n", encoding="utf-8")
+    return None, scoped_file, {
+        "run": True,
+        "reason": "baseline scoped to uncovered high-confidence opportunity hosts",
+        "roi_hosts": roi_hosts,
+        "covered_hosts": sorted(current_hosts),
+        "gap_hosts": gap_hosts,
+        "targets": scoped_targets,
+        "path": str(scoped_file),
+    }
 
 
 def _default_template_dir() -> Path:
@@ -501,6 +821,10 @@ def run(
     resolved_exclude_tags = exclude_tags if exclude_tags is not None else str(settings.get("exclude_tags") or "")
     resolved_rate = int(settings.get("rate_limit") or get_profiled_rate_limit("nuclei", 25, profile, config))
     resolved_concurrency = concurrency or get_profiled_concurrency("nuclei", 25, profile, config)
+    baseline_enabled = bool(config_get(config, "nuclei.baseline_scan.enabled", True))
+    baseline_severity = str(config_get(config, "nuclei.baseline_scan.severity", "critical,high") or "critical,high")
+    baseline_tags = str(config_get(config, "nuclei.baseline_scan.tags", "cve,exposure,misconfig") or "").strip()
+    baseline_max_targets = int(config_get(config, "nuclei.baseline_scan.max_targets", 50) or 0)
     detected_technologies = _load_detected_technologies(output, target_name)
     template_intelligence = _load_template_intelligence(output, target_name)
     selected_tags_requested = [
@@ -509,8 +833,11 @@ def run(
         if str(tag).strip()
     ] if isinstance(template_intelligence.get("selected_tags"), list) else []
     selected_tags = list(selected_tags_requested)
-    automatic_scan = bool(config_get(config, "nuclei.automatic_scan", True)) and not explicit_templates and not selected_tags
-    selection_reason = "explicit templates" if explicit_templates else "intelligence tags" if selected_tags else "automatic scan" if automatic_scan else f"profile {profile}"
+    automatic_scan = bool(config_get(config, "nuclei.automatic_scan", False)) and not explicit_templates and not selected_tags
+    baseline_only = baseline_enabled and not explicit_templates and not selected_tags and not automatic_scan
+    if baseline_only:
+        resolved_severity = baseline_severity
+    selection_reason = "explicit templates" if explicit_templates else "intelligence tags" if selected_tags else "automatic scan" if automatic_scan else "baseline-only: no high-confidence intelligence tags" if baseline_only else f"profile {profile}"
     target_scope = _scope_target_list(target_list, output, target_name, out_dir, selected_tags, explicit_list=list_file is not None)
     if target_scope.get("enabled"):
         cmd = _remove_flag_with_value(cmd, "-l")
@@ -530,6 +857,8 @@ def run(
         cmd += ["-c", str(resolved_concurrency)]
     if selected_tags and not explicit_templates:
         cmd += ["-tags", ",".join(selected_tags)]
+    elif baseline_only and baseline_tags:
+        cmd += ["-tags", baseline_tags]
     if automatic_scan:
         cmd += ["-as"]
 
@@ -579,8 +908,182 @@ def run(
         cmd += ["-l", str(capped_file)]
         target_list = capped_file
         target_count = target_ceiling
-    baseline_enabled = bool(config_get(config, "nuclei.baseline_scan.enabled", True))
-    baseline_severity = str(config_get(config, "nuclei.baseline_scan.severity", "critical,high") or "critical,high")
+    if baseline_only and target_list and baseline_max_targets > 0 and target_count > baseline_max_targets:
+        raw_targets = [line.strip() for line in target_list.read_text(encoding="utf-8-sig").splitlines() if line.strip()]
+        capped_file = out_dir / "baseline_only_targets_capped.txt"
+        capped_file.write_text("\n".join(raw_targets[:baseline_max_targets]) + "\n", encoding="utf-8")
+        warn(f"Nuclei baseline-only targets capped at {baseline_max_targets} of {target_count}")
+        cmd = _remove_flag_with_value(cmd, "-l")
+        cmd += ["-l", str(capped_file)]
+        target_list = capped_file
+        target_count = baseline_max_targets
+    roi_gate_enabled = bool(config_get(config, "nuclei.roi_gate.enabled", True))
+    roi_decision = _nuclei_roi_decision(
+        output,
+        target_name,
+        baseline_only=baseline_only,
+        selected_tags=selected_tags,
+        explicit_templates=explicit_templates,
+        automatic_scan=automatic_scan,
+    )
+    if roi_gate_enabled and not bool(roi_decision.get("run", True)):
+        duration = time.perf_counter() - started
+        reason = str(roi_decision.get("reason") or "baseline-only scan skipped: insufficient opportunity evidence")
+        metadata = {
+            "profile": profile,
+            "status": "skipped",
+            "skip_reason": reason,
+            "severity": resolved_severity,
+            "exclude_tags": resolved_exclude_tags,
+            "automatic_scan": automatic_scan,
+            "baseline_only": baseline_only,
+            "detected_technologies": detected_technologies,
+            "template_intelligence": template_intelligence,
+            "selected_tags_requested": selected_tags_requested,
+            "selected_tags": selected_tags,
+            "selection_reason": selection_reason,
+            "coverage_strategy": "skipped_low_roi_baseline",
+            "roi_decision": roi_decision,
+            "baseline_reason": reason,
+            "baseline_skip_reason": reason,
+            "baseline_roi": {"run": False, "reason": reason, "targets": []},
+            "baseline_targets": [],
+            "target_scope": target_scope,
+            "template_candidates": None,
+            "template_count_preflight": False,
+            "templates_executed": 0,
+            "templates_skipped": None,
+            "baseline_scan": {
+                "enabled": baseline_enabled,
+                "applied": False,
+                "status": "skipped",
+                "reason": reason,
+                "skip_reason": reason,
+                "roi": {"run": False, "reason": reason, "targets": []},
+                "targets": [],
+                "severity": baseline_severity,
+                "tags": baseline_tags,
+                "max_targets": baseline_max_targets,
+                "template_candidates": None,
+                "templates_executed": 0,
+                "targets_count": 0,
+                "duration_seconds": 0.0,
+            },
+            "targets_count": target_count,
+            "target_ceiling": target_ceiling,
+            "rate_limit": resolved_rate,
+            "concurrency": resolved_concurrency,
+            "request_timeout": config_get(config, "nuclei.request_timeout", 8),
+            "retries": config_get(config, "nuclei.retries", 0),
+            "module_timeout": module_timeout,
+            "enforce_module_timeout": enforce_module_timeout,
+            "duration_seconds": round(duration, 2),
+            "findings_count": 0,
+            "targets": target_name,
+            "command": cmd,
+        }
+        _write_nuclei_skip_artifacts(out_dir, metadata)
+        skip("Nuclei module skipped")
+        info(f"Reason: {reason}")
+        print_module_summary(
+            "Nuclei Summary",
+            {
+                "Target": target_name,
+                "Duration": f"{duration:.2f}s",
+                "Nuclei Status": "Skipped",
+                "Reason": reason,
+                "Targets": target_count,
+            },
+        )
+        return skipped_result(reason)
+    if roi_gate_enabled and baseline_only and not explicit_templates and not selected_tags:
+        roi_max_targets = int(config_get(config, "nuclei.roi_gate.max_targets", min(baseline_max_targets or 10, 10)) or 10)
+        scoped_domain, scoped_list, roi_target_scope = _scope_baseline_targets_to_roi(
+            target_domain,
+            target_list,
+            output,
+            target_name,
+            out_dir,
+            max_hosts=roi_max_targets,
+        )
+        roi_scoped_targets = roi_target_scope.get("scoped_targets")
+        if roi_scoped_targets is not None and int(roi_scoped_targets or 0) == 0:
+            duration = time.perf_counter() - started
+            reason = str(roi_target_scope.get("reason") or "baseline-only scan skipped: no ROI-scoped targets")
+            metadata = {
+                "profile": profile,
+                "status": "skipped",
+                "skip_reason": reason,
+                "severity": resolved_severity,
+                "exclude_tags": resolved_exclude_tags,
+                "automatic_scan": automatic_scan,
+                "baseline_only": baseline_only,
+                "detected_technologies": detected_technologies,
+                "template_intelligence": template_intelligence,
+                "selected_tags_requested": selected_tags_requested,
+                "selected_tags": selected_tags,
+                "selection_reason": selection_reason,
+                "coverage_strategy": "skipped_low_roi_baseline",
+                "roi_decision": roi_decision,
+                "baseline_reason": reason,
+                "baseline_skip_reason": reason,
+                "baseline_roi": {"run": False, "reason": reason, "targets": []},
+                "baseline_targets": [],
+                "target_scope": roi_target_scope,
+                "template_candidates": None,
+                "template_count_preflight": False,
+                "templates_executed": 0,
+                "templates_skipped": None,
+                "baseline_scan": {
+                    "enabled": baseline_enabled,
+                    "applied": False,
+                    "status": "skipped",
+                    "reason": reason,
+                    "skip_reason": reason,
+                    "roi": {"run": False, "reason": reason, "targets": []},
+                    "targets": [],
+                    "severity": baseline_severity,
+                    "tags": baseline_tags,
+                    "max_targets": baseline_max_targets,
+                    "template_candidates": None,
+                    "templates_executed": 0,
+                    "targets_count": 0,
+                    "duration_seconds": 0.0,
+                },
+                "targets_count": 0,
+                "target_ceiling": target_ceiling,
+                "rate_limit": resolved_rate,
+                "concurrency": resolved_concurrency,
+                "request_timeout": config_get(config, "nuclei.request_timeout", 8),
+                "retries": config_get(config, "nuclei.retries", 0),
+                "module_timeout": module_timeout,
+                "enforce_module_timeout": enforce_module_timeout,
+                "duration_seconds": round(duration, 2),
+                "findings_count": 0,
+                "targets": target_name,
+                "command": cmd,
+            }
+            _write_nuclei_skip_artifacts(out_dir, metadata)
+            skip("Nuclei module skipped")
+            info(f"Reason: {reason}")
+            return skipped_result(reason)
+        if roi_target_scope.get("enabled"):
+            cmd = _remove_flag_with_value(cmd, "-l")
+            cmd = _remove_flag_with_value(cmd, "-u")
+            target_domain = scoped_domain
+            target_list = scoped_list
+            if target_list:
+                cmd += ["-l", str(target_list)]
+            elif target_domain:
+                cmd += ["-u", str(target_domain)]
+            target_count = _count_targets(target_domain, target_list)
+            target_scope = roi_target_scope
+            selection_reason += "; scoped to validated opportunity hosts"
+            info(f"Nuclei baseline-only scope reduced to {target_count} opportunity targets")
+        elif roi_target_scope.get("reason"):
+            target_scope = roi_target_scope
+    baseline_roi: Dict[str, object] = {"run": False, "reason": "not evaluated", "targets": []}
+    baseline_skip_reason = ""
     baseline_target_domain = original_target_domain
     baseline_target_list = original_target_list
     baseline_target_count = _count_targets(baseline_target_domain, baseline_target_list)
@@ -591,7 +1094,28 @@ def run(
         baseline_target_list = baseline_capped_file
         baseline_target_domain = None
         baseline_target_count = target_ceiling
-    baseline_needed = baseline_enabled and bool(selected_tags) and not explicit_templates
+    baseline_needed, baseline_reason = _baseline_practicality(baseline_enabled, selected_tags, explicit_templates, baseline_target_count, baseline_max_targets)
+    if baseline_needed and roi_gate_enabled and bool(config_get(config, "nuclei.baseline_scan.high_confidence_only", True)):
+        baseline_roi_max_targets = int(config_get(config, "nuclei.baseline_scan.max_targets", 50) or 0) or 50
+        scoped_baseline_domain, scoped_baseline_list, baseline_roi = _scope_smart_baseline_targets(
+            original_target_domain,
+            original_target_list,
+            target_domain,
+            target_list,
+            output,
+            target_name,
+            out_dir,
+            max_hosts=baseline_roi_max_targets,
+        )
+        if baseline_roi.get("run"):
+            baseline_target_domain = scoped_baseline_domain
+            baseline_target_list = scoped_baseline_list
+            baseline_target_count = _count_targets(baseline_target_domain, baseline_target_list)
+            baseline_reason = str(baseline_roi.get("reason") or baseline_reason)
+        else:
+            baseline_needed = False
+            baseline_skip_reason = str(baseline_roi.get("reason") or "baseline skipped by opportunity ROI")
+            baseline_reason = baseline_skip_reason
     count_templates_before_run = bool(config_get(config, "nuclei.count_templates_before_run", False))
     baseline_cmd = _baseline_target_command(cmd, baseline_target_domain, baseline_target_list)
     baseline_cmd = _replace_flag_value(baseline_cmd, "-severity", baseline_severity)
@@ -613,12 +1137,21 @@ def run(
             cmd += ["-u", str(target_domain)]
         selected_tags = []
         target_scope = {"enabled": False, "reason": "tag fallback disabled target scoping"}
-        automatic_scan = bool(config_get(config, "nuclei.automatic_scan", True)) and not explicit_templates
+        automatic_scan = bool(config_get(config, "nuclei.automatic_scan", False)) and not explicit_templates
+        baseline_only = baseline_enabled and not explicit_templates and not automatic_scan
+        cmd = _remove_flag_with_value(cmd, "-severity")
+        cmd = _remove_flag_with_value(cmd, "-tags")
+        if baseline_only:
+            resolved_severity = baseline_severity
+            cmd += ["-severity", baseline_severity]
+            if baseline_tags:
+                cmd += ["-tags", baseline_tags]
         if automatic_scan and "-as" not in cmd:
             cmd += ["-as"]
-        selection_reason = "intelligence tags unavailable; fallback to automatic scan" if automatic_scan else f"intelligence tags unavailable; fallback to profile {profile}"
+        selection_reason = "intelligence tags unavailable; fallback to automatic scan" if automatic_scan else "intelligence tags unavailable; fallback to baseline-only" if baseline_only else f"intelligence tags unavailable; fallback to profile {profile}"
         template_candidates = _count_matching_templates(cmd, timeout=min(module_timeout or 60, 60)) if count_templates_before_run else None
         baseline_needed = False
+        baseline_reason = "tag fallback disabled baseline"
     info(f"Running nuclei profile={profile} severity={resolved_severity} targets={target_name}" + (" automatic-scan=on" if automatic_scan else ""))
     info(f"Template selection reason: {selection_reason}")
     if detected_technologies:
@@ -680,10 +1213,18 @@ def run(
                 cmd += ["-u", str(target_domain)]
             selected_tags = []
             target_scope = {"enabled": False, "reason": "tag fallback disabled target scoping"}
-            automatic_scan = bool(config_get(config, "nuclei.automatic_scan", True)) and not explicit_templates
+            automatic_scan = bool(config_get(config, "nuclei.automatic_scan", False)) and not explicit_templates
+            baseline_only = baseline_enabled and not explicit_templates and not automatic_scan
+            cmd = _remove_flag_with_value(cmd, "-severity")
+            cmd = _remove_flag_with_value(cmd, "-tags")
+            if baseline_only:
+                resolved_severity = baseline_severity
+                cmd += ["-severity", baseline_severity]
+                if baseline_tags:
+                    cmd += ["-tags", baseline_tags]
             if automatic_scan and "-as" not in cmd:
                 cmd += ["-as"]
-            selection_reason = "intelligence tags failed; fallback to automatic scan" if automatic_scan else f"intelligence tags failed; fallback to profile {profile}"
+            selection_reason = "intelligence tags failed; fallback to automatic scan" if automatic_scan else "intelligence tags failed; fallback to baseline-only" if baseline_only else f"intelligence tags failed; fallback to profile {profile}"
             template_candidates = _count_matching_templates(cmd, timeout=min(module_timeout or 60, 60)) if count_templates_before_run else None
             baseline_needed = False
             with log_duration(log, "nuclei tag fallback retry"):
@@ -741,13 +1282,18 @@ def run(
                 "severity": resolved_severity,
                 "exclude_tags": resolved_exclude_tags,
                 "automatic_scan": automatic_scan,
+                "baseline_only": baseline_only,
                 "detected_technologies": detected_technologies,
                 "template_intelligence": template_intelligence,
                 "selected_tags_requested": selected_tags_requested,
                 "selected_tags": selected_tags,
                 "selection_reason": selection_reason,
-                "coverage_strategy": "smart_tags_plus_lightweight_baseline" if baseline_needed else selection_reason,
+                "coverage_strategy": "smart_tags_plus_lightweight_baseline" if baseline_needed else "baseline_only" if baseline_only else selection_reason,
                 "tag_fallback_reason": tag_fallback_reason,
+                "baseline_reason": baseline_reason,
+                "baseline_skip_reason": baseline_skip_reason,
+                "baseline_roi": baseline_roi,
+                "baseline_targets": baseline_roi.get("targets", []) if isinstance(baseline_roi, dict) else [],
                 "target_scope": target_scope,
                 "template_candidates": template_candidates,
                 "template_count_preflight": count_templates_before_run,
@@ -757,7 +1303,13 @@ def run(
                     "enabled": baseline_enabled,
                     "applied": baseline_needed,
                     "status": baseline_status,
+                    "reason": baseline_reason,
+                    "skip_reason": baseline_skip_reason,
+                    "roi": baseline_roi,
+                    "targets": baseline_roi.get("targets", []) if isinstance(baseline_roi, dict) else [],
                     "severity": baseline_severity,
+                    "tags": baseline_tags,
+                    "max_targets": baseline_max_targets,
                     "template_candidates": baseline_template_candidates,
                     "templates_executed": baseline_templates_executed,
                     "targets_count": baseline_target_count if baseline_needed else 0,
@@ -827,18 +1379,29 @@ def run(
                 "severity": resolved_severity,
                 "exclude_tags": resolved_exclude_tags,
                 "automatic_scan": automatic_scan,
+                "baseline_only": baseline_only if "baseline_only" in locals() else False,
                 "selected_tags_requested": selected_tags_requested,
                 "selected_tags": selected_tags,
                 "selection_reason": selection_reason,
-                "coverage_strategy": "smart_tags_plus_lightweight_baseline" if "baseline_needed" in locals() and baseline_needed else selection_reason,
+                "coverage_strategy": "smart_tags_plus_lightweight_baseline" if "baseline_needed" in locals() and baseline_needed else "baseline_only" if "baseline_only" in locals() and baseline_only else selection_reason,
                 "tag_fallback_reason": tag_fallback_reason,
+                "baseline_reason": baseline_reason if "baseline_reason" in locals() else "not evaluated",
+                "baseline_skip_reason": baseline_skip_reason if "baseline_skip_reason" in locals() else "",
+                "baseline_roi": baseline_roi if "baseline_roi" in locals() else {"run": False, "reason": "not evaluated", "targets": []},
+                "baseline_targets": baseline_roi.get("targets", []) if "baseline_roi" in locals() and isinstance(baseline_roi, dict) else [],
                 "target_scope": target_scope if "target_scope" in locals() else None,
                 "template_candidates": template_candidates if "template_candidates" in locals() else None,
                 "baseline_scan": {
                     "enabled": baseline_enabled if "baseline_enabled" in locals() else bool(config_get(config, "nuclei.baseline_scan.enabled", True)),
                     "applied": baseline_needed if "baseline_needed" in locals() else False,
                     "status": "timed_out" if "baseline_needed" in locals() and baseline_needed else "not_applicable",
+                    "reason": baseline_reason if "baseline_reason" in locals() else "not evaluated",
+                    "skip_reason": baseline_skip_reason if "baseline_skip_reason" in locals() else "",
+                    "roi": baseline_roi if "baseline_roi" in locals() else {"run": False, "reason": "not evaluated", "targets": []},
+                    "targets": baseline_roi.get("targets", []) if "baseline_roi" in locals() and isinstance(baseline_roi, dict) else [],
                     "severity": baseline_severity if "baseline_severity" in locals() else str(config_get(config, "nuclei.baseline_scan.severity", "critical,high") or "critical,high"),
+                    "tags": baseline_tags if "baseline_tags" in locals() else str(config_get(config, "nuclei.baseline_scan.tags", "cve,exposure,misconfig") or ""),
+                    "max_targets": baseline_max_targets if "baseline_max_targets" in locals() else int(config_get(config, "nuclei.baseline_scan.max_targets", 50) or 0),
                     "template_candidates": baseline_template_candidates if "baseline_template_candidates" in locals() else None,
                     "templates_executed": None,
                     "targets_count": baseline_target_count if "baseline_target_count" in locals() and baseline_needed else 0,

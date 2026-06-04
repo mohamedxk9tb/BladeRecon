@@ -206,6 +206,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "baseline_scan": {
             "enabled": True,
             "severity": "critical,high",
+            "max_targets": 50,
         },
     },
     "advanced": {
@@ -621,7 +622,11 @@ def status(kind: str, message: str) -> None:
     style = styles.get(label, "white")
     encoding = getattr(console.file, "encoding", None) or sys.stdout.encoding or "utf-8"
     safe_message = str(message).encode(encoding, errors="replace").decode(encoding, errors="replace")
-    console.print(f"[{style}][{label}][/] {escape(safe_message)}")
+    try:
+        console.print(f"[{style}][{label}][/] {escape(safe_message)}")
+    except OSError:
+        fallback = getattr(sys, "__stdout__", None) or sys.stdout
+        print(f"[{label}] {safe_message}", file=fallback)
 
 
 def format_duration(seconds: float) -> str:

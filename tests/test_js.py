@@ -1,4 +1,7 @@
-from bladerecon.modules.js import _extract_script_urls, _prioritize_alive_hosts
+import json
+from pathlib import Path
+
+from bladerecon.modules.js import _extract_script_urls, _load_historical_js_candidates, _prioritize_alive_hosts
 
 
 def test_extract_script_urls_resolves_relative_and_deduplicates() -> None:
@@ -28,3 +31,14 @@ def test_prioritize_alive_hosts_prefers_real_pages_over_404s() -> None:
     ]
 
     assert _prioritize_alive_hosts(alive, probe_rows, "example.com", 1) == ["https://store.example.com"]
+
+
+def test_load_historical_js_candidates_reuses_existing_artifact(tmp_path: Path) -> None:
+    historical = tmp_path / "historical_js"
+    historical.mkdir()
+    (historical / "js_urls.json").write_text(
+        json.dumps([{"url": "https://cdn.example.com/app.js"}, {"url": "https://cdn.example.com/app.js"}]),
+        encoding="utf-8",
+    )
+
+    assert _load_historical_js_candidates(tmp_path) == ["https://cdn.example.com/app.js"]

@@ -179,7 +179,7 @@ wordlist_expansion:
 timeouts:
   http: 10
   nuclei: 300
-  screenshot: 45
+  screenshot: 20
   source: 30
 
 probe:
@@ -188,6 +188,7 @@ probe:
 
 js:
   max_html_pages: 40
+  historical_fallback_enabled: true
 
 nuclei_profiles:
   safe:
@@ -204,16 +205,22 @@ nuclei_profiles:
     rate_limit: 50
 
 nuclei:
-  automatic_scan: true
+  automatic_scan: false
+  roi_gate:
+    enabled: true
+    max_targets: 10
   count_templates_before_run: false
   request_timeout: 8
   retries: 0
-  module_timeout: 0
-  enforce_module_timeout: false
+  module_timeout: 300
+  enforce_module_timeout: true
   progress_interval: 10
   baseline_scan:
     enabled: true
+    high_confidence_only: true
     severity: "critical,high"
+    tags: "cve,exposure,misconfig"
+    max_targets: 50
 
 opsec:
   proxy: ""
@@ -226,6 +233,8 @@ opsec:
 screenshots:
   browser_fallback_enabled: true
   max_browser_probes: 25
+  retries: 0
+  slow_target_threshold: 10
   skip_duplicate_titles: true
   skip_duplicate_content_lengths: true
   placeholder_titles:
@@ -238,6 +247,7 @@ screenshots:
 advanced:
   historical:
     max_urls: 1000
+    source_timeout: 12
     sources:
       wayback: true
       commoncrawl: true

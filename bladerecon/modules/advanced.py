@@ -19,9 +19,11 @@ from urllib.parse import parse_qs, urljoin, urlparse, urlunparse
 import httpx
 
 from .endpoints import _extract_endpoint_items
+from .secrets import _find_secrets
 from .utils import (
     AsyncRateLimiter,
     ModuleResult,
+    atomic_write_text,
     async_retry,
     config_get,
     dedupe_preserve_order,
@@ -54,10 +56,18 @@ INTERESTING_CONTENT_WORDS = [
     "dashboard",
     "panel",
     "internal",
+    "api",
+    "graphql",
+    "swagger",
+    "openapi.json",
+    ".env",
+    "config",
     "backup",
     "staging",
     "test",
     "debug",
+    "actuator",
+    "metrics",
 ]
 
 SECURITY_HEADER_NAMES = {
@@ -208,11 +218,88 @@ def _historical_endpoint_category(url: str) -> str:
     return "REST"
 
 
+def _historical_source_roi(attribution: List[Dict[str, Any]], source_stats: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Summarize historical source value after dedupe and ceiling selection."""
+    source_map: Dict[str, Dict[str, Any]] = {}
+    interesting_tokens = (
+        "/api/",
+        "/api",
+        "/graphql",
+        "/admin",
+        "/swagger",
+        "/openapi",
+        "/api-docs",
+        "/debug",
+        "/actuator",
+        "/v1/",
+        "/v2/",
+        "/v3/",
+    )
+    for row in attribution:
+        url = str(row.get("url") or "")
+        sources = row.get("sources", [])
+        if not isinstance(sources, list):
+            continue
+        has_params = bool(urlparse(url).query)
+        is_endpoint = any(token in url.lower() for token in interesting_tokens)
+        for source in sources:
+            key = str(source or "unknown")
+            stats = source_map.setdefault(
+                key,
+                {
+                    "source": key,
+                    "selected_urls": 0,
+                    "endpoint_candidates": 0,
+                    "parameterized_urls": 0,
+                    "opportunity_candidates": 0,
+                },
+            )
+            stats["selected_urls"] += 1
+            if is_endpoint:
+                stats["endpoint_candidates"] += 1
+                stats["opportunity_candidates"] += 1
+            if has_params:
+                stats["parameterized_urls"] += 1
+
+    request_map = {str(item.get("source") or "unknown"): item for item in source_stats if isinstance(item, dict)}
+    roi_rows: List[Dict[str, Any]] = []
+    for source, stats in sorted(source_map.items()):
+        source_meta = request_map.get(source, {})
+        duration = float(source_meta.get("duration_seconds") or 0)
+        requests = int(source_meta.get("requests_sent") or 0)
+        selected = int(stats["selected_urls"])
+        opportunities = int(stats["opportunity_candidates"])
+        stats["duration_seconds"] = round(duration, 2)
+        stats["requests_sent"] = requests
+        stats["signal_to_noise_ratio"] = round(opportunities / max(selected, 1), 3)
+        stats["opportunities_per_second"] = round(opportunities / max(duration, 0.001), 3) if duration else opportunities
+        stats["urls_per_request"] = round(selected / max(requests, 1), 3)
+        roi_rows.append(stats)
+    return sorted(roi_rows, key=lambda item: (int(item.get("opportunity_candidates") or 0), int(item.get("selected_urls") or 0)), reverse=True)
+
+
+def _historical_source_timeout(config: dict) -> float:
+    configured = config_get(config, "advanced.historical.source_timeout", None)
+    if configured is not None:
+        return max(1.0, float(configured))
+    return max(1.0, min(float(config_get(config, "timeouts.source", 30) or 30), 12.0))
+
+
+async def _timed_source(name: str, task: Any) -> Tuple[str, List[Dict[str, str]], int, float, str]:
+    started = time.perf_counter()
+    try:
+        rows, requests = await task
+        return name, rows, requests, time.perf_counter() - started, "completed"
+    except Exception as exc:
+        warn(f"{name} historical URLs unavailable: {exc}")
+        return name, [], 0, time.perf_counter() - started, "failed"
+
+
 async def _fetch_wayback(domain: str, config: dict, limiter: AsyncRateLimiter) -> Tuple[List[Dict[str, str]], int]:
     url = f"https://web.archive.org/cdx/search/cdx?url=*.{domain}/*&output=json&fl=original&collapse=urlkey"
     try:
         await limiter.wait()
-        async with httpx.AsyncClient(timeout=float(config_get(config, "timeouts.source", 30)), follow_redirects=True, **httpx_client_kwargs(config)) as client:
+        async with httpx.AsyncClient(timeout=_historical_source_timeout(config), follow_redirects=True, **httpx_client_kwargs(config)) as client:
             resp = await _source_get(client, "Wayback", url)
             resp.raise_for_status()
             data = resp.json()
@@ -230,7 +317,7 @@ async def _fetch_wayback(domain: str, config: dict, limiter: AsyncRateLimiter) -
 
 async def _fetch_commoncrawl(domain: str, config: dict, limiter: AsyncRateLimiter) -> Tuple[List[Dict[str, str]], int]:
     requests = 0
-    timeout = float(config_get(config, "timeouts.source", 30))
+    timeout = _historical_source_timeout(config)
     try:
         await limiter.wait()
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, **httpx_client_kwargs(config)) as client:
@@ -276,7 +363,7 @@ async def _fetch_otx_urls(domain: str, config: dict, limiter: AsyncRateLimiter) 
         if api_key:
             headers["X-OTX-API-KEY"] = str(api_key)
         await limiter.wait()
-        async with httpx.AsyncClient(timeout=float(config_get(config, "timeouts.source", 30)), headers=headers, **kwargs) as client:
+        async with httpx.AsyncClient(timeout=_historical_source_timeout(config), headers=headers, **kwargs) as client:
             resp = await _source_get(client, "AlienVault", url)
             resp.raise_for_status()
             data = resp.json()
@@ -319,22 +406,48 @@ def _local_historical_url_rows(target_dir: Path) -> List[Dict[str, str]]:
 async def collect_historical(target: str, output: Path, config: dict, profile: str, resume: bool = False) -> Tuple[Dict[str, Any], int]:
     domain = _target_host(target)
     target_dir = target_output_dir(output, target)
+    existing_meta = target_dir / "historical" / "metadata.json"
+    existing_urls = target_dir / "historical" / "urls.txt"
+    if existing_meta.exists() and existing_urls.exists():
+        existing = _read_json(existing_meta, {})
+        if isinstance(existing, dict) and existing.get("generated_by") == "js_historical_fallback":
+            return existing, 0
     out_dir = prepare_module_output(output, target, "historical", resume=resume)
     limiter = AsyncRateLimiter(get_profiled_rate_limit("advanced_sources", 1.0, profile, config))
     requests = 0
     source_rows: List[Dict[str, str]] = []
-    source_rows.extend(_local_historical_url_rows(target_dir))
+    local_rows = _local_historical_url_rows(target_dir)
+    source_rows.extend(local_rows)
+    source_stats = [
+        {
+            "source": "local",
+            "urls": len(local_rows),
+            "requests_sent": 0,
+            "duration_seconds": 0.0,
+            "status": "completed",
+        }
+    ]
     tasks = []
     sources_cfg = config_get(config, "advanced.historical.sources", {})
     if isinstance(sources_cfg, dict) and sources_cfg.get("wayback", True):
-        tasks.append(_fetch_wayback(domain, config, limiter))
+        tasks.append(_timed_source("wayback", _fetch_wayback(domain, config, limiter)))
     if isinstance(sources_cfg, dict) and sources_cfg.get("commoncrawl", True):
-        tasks.append(_fetch_commoncrawl(domain, config, limiter))
+        tasks.append(_timed_source("commoncrawl", _fetch_commoncrawl(domain, config, limiter)))
     if isinstance(sources_cfg, dict) and sources_cfg.get("alienvault", True):
-        tasks.append(_fetch_otx_urls(domain, config, limiter))
-    for result_rows, count in await asyncio.gather(*tasks, return_exceptions=False) if tasks else []:
+        tasks.append(_timed_source("alienvault", _fetch_otx_urls(domain, config, limiter)))
+    for source_name, result_rows, count, duration, status in await asyncio.gather(*tasks, return_exceptions=False) if tasks else []:
         source_rows.extend(result_rows)
         requests += count
+        source_stats.append(
+            {
+                "source": source_name,
+                "urls": len(result_rows),
+                "requests_sent": count,
+                "duration_seconds": round(duration, 2),
+                "status": status,
+                "urls_per_second": round(len(result_rows) / max(duration, 0.001), 3),
+            }
+        )
 
     max_urls = get_profiled_ceiling("historical_urls", int(config_get(config, "advanced.historical.max_urls", 1000)), profile, config)
     normalized: Dict[str, Set[str]] = {}
@@ -348,9 +461,10 @@ async def collect_historical(target: str, output: Path, config: dict, profile: s
     parameters = _extract_parameters(urls)
     endpoints = _extract_endpoint_rows(urls)
     attribution = [{"url": url, "sources": sorted(normalized.get(url, []))} for url in urls]
-    (out_dir / "urls.txt").write_text("\n".join(urls), encoding="utf-8")
-    (out_dir / "parameters.txt").write_text("\n".join(parameters), encoding="utf-8")
-    (out_dir / "endpoints.txt").write_text("\n".join(row["endpoint"] for row in endpoints), encoding="utf-8")
+    source_roi = _historical_source_roi(attribution, source_stats)
+    atomic_write_text(out_dir / "urls.txt", "\n".join(urls), encoding="utf-8")
+    atomic_write_text(out_dir / "parameters.txt", "\n".join(parameters), encoding="utf-8")
+    atomic_write_text(out_dir / "endpoints.txt", "\n".join(row["endpoint"] for row in endpoints), encoding="utf-8")
     write_json(out_dir / "urls.json", attribution)
     write_json(out_dir / "endpoints.json", endpoints)
     metadata = {
@@ -361,6 +475,9 @@ async def collect_historical(target: str, output: Path, config: dict, profile: s
         "requests_sent": requests,
         "ceiling": max_urls,
         "ceiling_skipped": skipped,
+        "source_timeout": _historical_source_timeout(config),
+        "source_stats": source_stats,
+        "source_roi": source_roi,
         "safety_profile": profile,
     }
     write_json(out_dir / "metadata.json", metadata)
@@ -423,12 +540,44 @@ def _candidate_content_paths(target_dir: Path, config: dict) -> List[str]:
     return dedupe_preserve_order(paths)
 
 
+def _content_discovery_host_score(url: str, probe_by_url: Dict[str, Dict[str, Any]]) -> int:
+    parsed = urlparse(url if "://" in url else f"https://{url}")
+    host = (parsed.hostname or url).lower()
+    row = probe_by_url.get(url, probe_by_url.get(url.rstrip("/"), {}))
+    text = " ".join(
+        str(row.get(key) or "")
+        for key in ("url", "final_url", "title", "server", "cdn", "waf")
+        if isinstance(row, dict)
+    ).lower()
+    score = 0
+    if any(token in host for token in ("api", "admin", "auth", "login", "dev", "staging", "test", "beta", "portal", "dashboard")):
+        score += 45
+    if any(token in text for token in ("api", "admin", "auth", "login", "graphql", "swagger", "openapi", "dashboard", "portal")):
+        score += 40
+    status = int(row.get("status_code") or 0) if isinstance(row, dict) else 0
+    if status in {200, 401, 403}:
+        score += 20
+    if any(token in text for token in ("cloudflare", "fastly", "akamai", "cloudfront", "cdn")) and score < 45:
+        score -= 25
+    return score
+
+
 async def run_content_discovery(target: str, output: Path, config: dict, profile: str, resume: bool = False) -> Tuple[Dict[str, Any], int]:
     target_dir = target_output_dir(output, target)
     out_dir = prepare_module_output(output, target, "content_discovery", resume=resume)
     alive_hosts = _read_lines(target_dir / "probe" / "alive.txt")
+    probe_rows = _read_json(target_dir / "probe" / "probe.json", [])
+    probe_by_url: Dict[str, Dict[str, Any]] = {}
+    for row in probe_rows if isinstance(probe_rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        for key in ("url", "final_url"):
+            value = str(row.get(key) or "").strip()
+            if value:
+                probe_by_url[value] = row
+                probe_by_url[value.rstrip("/")] = row
     max_hosts = int(config_get(config, "advanced.content_discovery.max_hosts", 8) or 8)
-    hosts = alive_hosts[:max_hosts]
+    hosts = sorted(alive_hosts, key=lambda item: (-_content_discovery_host_score(item, probe_by_url), item))[:max_hosts]
     paths = _candidate_content_paths(target_dir, config)
     ceiling = get_profiled_ceiling("content_discovery", int(config_get(config, "advanced.content_discovery.max_requests", 80)), profile, config)
     candidates = [urljoin(host.rstrip("/") + "/", path.lstrip("/")) for host in hosts for path in paths]
@@ -483,7 +632,7 @@ async def run_content_discovery(target: str, output: Path, config: dict, profile
         await asyncio.gather(*(check(url) for url in candidates), return_exceptions=True)
 
     found = sorted({row["url"]: row for row in found}.values(), key=lambda item: (-int(item.get("signal_score", 0)), item["url"]))
-    (out_dir / "interesting_paths.txt").write_text("\n".join(row["url"] for row in found), encoding="utf-8")
+    atomic_write_text(out_dir / "interesting_paths.txt", "\n".join(row["url"] for row in found), encoding="utf-8")
     write_json(out_dir / "interesting_paths.json", found)
     metadata = {
         "hosts": len(hosts),
@@ -509,6 +658,15 @@ def _content_signal(path: str, status: int) -> Dict[str, Any]:
     if any(token in lower for token in ("login", "auth")):
         score += 30
         reasons.append("authentication path keyword")
+    if any(token in lower for token in ("graphql", "swagger", "openapi")):
+        score += 45
+        reasons.append("API documentation or schema keyword")
+    elif re.search(r"(^|/)api($|/)", lower):
+        score += 25
+        reasons.append("API path keyword")
+    if any(token in lower for token in (".env", "backup", ".bak", "config", "debug", "actuator", "metrics")):
+        score += 35
+        reasons.append("sensitive or operational path keyword")
     if status in {401, 403}:
         score += 20
         reasons.append("access-controlled response")
@@ -615,11 +773,39 @@ async def collect_historical_js(target: str, output: Path, config: dict, profile
     timeout = float(config_get(config, "timeouts.http", 10))
     requests = 0
     endpoint_rows: List[Dict[str, str]] = []
+    secret_rows: List[Dict[str, str]] = []
     parameter_set: Set[str] = set()
+    skipped_large_js = 0
+    max_js_bytes = int(config_get(config, "js.max_file_bytes", 500000) or 500000)
+    live_local_by_url = {
+        str(row.get("url")): str(row.get("local_path"))
+        for row in live_js_rows
+        if isinstance(row, dict) and row.get("url") and row.get("local_path")
+    }
+
+    def parse_js_content(content: str, source_url: str) -> None:
+        parse_limit = max_js_bytes if max_js_bytes > 0 else 500000
+        snippet = content[:parse_limit]
+        for item in _extract_endpoint_items(snippet, source_url):
+            endpoint_rows.append({"endpoint": item["endpoint"], "source": source_url, "category": item["category"]})
+            parameter_set.update(_extract_parameters([item["endpoint"]]))
+        for finding in _find_secrets(snippet):
+            secret_rows.append({**finding, "source": source_url})
+
+    for url, local_path in live_local_by_url.items():
+        path = target_dir / local_path
+        if not path.exists():
+            continue
+        try:
+            parse_js_content(path.read_text(encoding="utf-8", errors="ignore"), url)
+        except Exception:
+            continue
 
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, verify=False, **httpx_client_kwargs(config)) as client:
         async def fetch(url: str) -> None:
-            nonlocal requests
+            nonlocal requests, skipped_large_js
+            if url in live_local_by_url:
+                return
             await limiter.wait()
             requests += 1
             try:
@@ -627,23 +813,34 @@ async def collect_historical_js(target: str, output: Path, config: dict, profile
                 resp.raise_for_status()
             except Exception:
                 return
-            for item in _extract_endpoint_items(resp.text[:500000], url):
-                endpoint_rows.append({"endpoint": item["endpoint"], "source": url, "category": item["category"]})
-                parameter_set.update(_extract_parameters([item["endpoint"]]))
+            if max_js_bytes > 0 and len(resp.content) > max_js_bytes:
+                skipped_large_js += 1
+                return
+            parse_js_content(resp.text, url)
 
         await asyncio.gather(*(fetch(url) for url in js_urls), return_exceptions=True)
 
     endpoint_rows = sorted({row["endpoint"].lower(): row for row in endpoint_rows}.values(), key=lambda item: item["endpoint"])
-    (out_dir / "js_urls.txt").write_text("\n".join(js_urls), encoding="utf-8")
-    (out_dir / "endpoints.txt").write_text("\n".join(row["endpoint"] for row in endpoint_rows), encoding="utf-8")
-    (out_dir / "parameters.txt").write_text("\n".join(sorted(parameter_set, key=str.lower)), encoding="utf-8")
+    secret_rows = sorted({(row["type"], row["value"], row["source"]): row for row in secret_rows}.values(), key=lambda item: (item["type"], item["source"]))
+    atomic_write_text(out_dir / "js_urls.txt", "\n".join(js_urls), encoding="utf-8")
+    atomic_write_text(out_dir / "endpoints.txt", "\n".join(row["endpoint"] for row in endpoint_rows), encoding="utf-8")
+    atomic_write_text(out_dir / "parameters.txt", "\n".join(sorted(parameter_set, key=str.lower)), encoding="utf-8")
+    atomic_write_text(
+        out_dir / "secrets.txt",
+        "\n".join(f"{row['type']} [{row.get('confidence', 'LOW')}]: {row.get('value_preview') or row['value']} ({row['source']})" for row in secret_rows),
+        encoding="utf-8",
+    )
     write_json(out_dir / "js_urls.json", [{"url": url, "sources": sorted(js_refs.get(url, []))} for url in js_urls])
     write_json(out_dir / "endpoints.json", endpoint_rows)
+    write_json(out_dir / "secrets.json", secret_rows)
     metadata = {
         "js_files": len(js_urls),
         "endpoints": len(endpoint_rows),
+        "secrets": len(secret_rows),
         "parameters": len(parameter_set),
         "requests_sent": requests,
+        "local_js_reused": len(live_local_by_url),
+        "skipped_large_js": skipped_large_js,
         "ceiling": ceiling,
         "ceiling_skipped": skipped,
         "signal_to_noise_ratio": round(len(endpoint_rows) / max(1, requests), 4),

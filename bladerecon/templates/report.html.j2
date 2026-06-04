@@ -57,6 +57,7 @@
       }
       .brand { display: flex; align-items: center; gap: 12px; color: var(--accent); font-weight: 800; letter-spacing: .02em; }
       .logo { width: 42px; height: 42px; display: grid; place-items: center; border: 1px solid rgba(34,211,238,.32); border-radius: 10px; background: rgba(34,211,238,.10); font-size: 1.35rem; }
+      .logo img { width: 100%; height: 100%; object-fit: contain; display: block; border-radius: 10px; }
       .hero h1 { margin: 16px 0 8px; font-size: clamp(2rem, 4vw, 3.5rem); line-height: 1.02; letter-spacing: 0; }
       .hero p { margin: 0; color: var(--muted); font-size: 1.02rem; }
       .hero-meta { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
@@ -104,6 +105,7 @@
       .status-number { font-size: 1.15rem; letter-spacing: 0; }
       .metric-label { color: var(--muted); font-size: .9rem; }
       .metric-note { color: var(--muted); font-size: .72rem; margin-top: 6px; min-height: 1em; }
+      .note { color: var(--muted); font-size: .86rem; line-height: 1.35; }
       .section { margin-top: 22px; scroll-margin-top: 18px; }
       .section-head { display: flex; justify-content: space-between; align-items: end; gap: 12px; margin-bottom: 12px; }
       h2 { margin: 0; font-size: 1.15rem; }
@@ -127,6 +129,11 @@
       .summary-card strong { color: var(--text); }
       .executive-card { border-top: 3px solid var(--accent); }
       .executive-label { color: var(--muted); font-size: .76rem; text-transform: uppercase; letter-spacing: .08em; }
+      .exec-dashboard { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+      .exec-card { min-height: 132px; display: grid; align-content: space-between; gap: 12px; }
+      .exec-card.primary { border-top: 3px solid var(--accent); }
+      .exec-value { display: block; margin-top: 8px; font-size: 1.85rem; line-height: 1; font-weight: 850; letter-spacing: 0; overflow-wrap: anywhere; }
+      .exec-note { color: var(--muted); font-size: .78rem; line-height: 1.3; }
       .severity-chart { display: grid; grid-template-columns: 1fr; gap: 10px; margin-bottom: 14px; }
       .severity-track { min-height: 18px; display: flex; overflow: hidden; border: 1px solid var(--border); border-radius: 999px; background: #020617; }
       .severity-segment { min-width: 0; width: 0%; transition: width .3s ease; }
@@ -150,6 +157,16 @@
       .reference-list { margin: 0; padding-left: 18px; }
       .ranking-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-top: 16px; }
       .ranking-card { border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); padding: 14px; }
+      .investigation-queue { display: grid; grid-template-columns: minmax(280px, 1.25fr) minmax(240px, .85fr); gap: 14px; margin-top: 16px; }
+      .investigation-stack { display: grid; gap: 12px; }
+      .investigation-card { border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); padding: 14px; display: grid; gap: 10px; }
+      .investigation-card.primary { border-color: rgba(34,211,238,.44); background: linear-gradient(135deg, rgba(34,211,238,.10), var(--panel-2)); }
+      .investigation-card.compact { gap: 8px; }
+      .lead-target { font-size: 1.05rem; font-weight: 850; overflow-wrap: anywhere; }
+      .action-line { border-left: 3px solid var(--accent); padding: 8px 10px; background: rgba(34,211,238,.07); color: var(--text); border-radius: 6px; }
+      .details-lite { border: 1px solid var(--border); border-radius: 8px; background: rgba(15,23,42,.62); }
+      .details-lite summary { cursor: pointer; padding: 8px 10px; color: var(--muted); font-weight: 700; }
+      .details-lite > div { border-top: 1px solid var(--border); padding: 10px; }
       .ranking-list { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 8px; }
       .ranking-list li { display: flex; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
       .ranking-list li:last-child { border-bottom: 0; padding-bottom: 0; }
@@ -223,13 +240,16 @@
         .sidebar { position: static; }
         .nav { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
         .surface, .severity-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .exec-dashboard { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .hero { grid-template-columns: 1fr; }
+        .investigation-queue { grid-template-columns: 1fr; }
         .meta-grid, .risk-panel { min-width: 0; }
       }
       @media (max-width: 620px) {
         .layout { width: min(100% - 24px, 1460px); padding-top: 14px; }
         .hero { padding: 18px; border-radius: 18px; }
         .kpis, .surface, .severity-grid, .intel-grid { grid-template-columns: 1fr 1fr; }
+        .exec-dashboard { grid-template-columns: 1fr; }
         .meta-grid { grid-template-columns: 1fr; }
         .toolbar, .panel-tools { align-items: stretch; }
         .actions, .search { width: 100%; }
@@ -255,7 +275,10 @@
         <div class="side-brand">BladeRecon</div>
         <nav class="nav">
           <a href="#overview"><span class="nav-icon">&#8962;</span> Overview</a>
+          <a href="#where-start"><span class="nav-icon">&#9733;</span> Start</a>
           <a href="#executive-summary"><span class="nav-icon">&#9632;</span> Summary</a>
+          <a href="#top-investigation-campaigns"><span class="nav-icon">&#9670;</span> Campaigns</a>
+          <a href="#top-investigation-targets"><span class="nav-icon">?</span> Targets</a>
           <a href="#subdomains"><span class="nav-icon">&#9711;</span> Subdomains</a>
           <a href="#javascript"><span class="nav-icon">{ }</span> JavaScript</a>
           <a href="#endpoints"><span class="nav-icon">&#8599;</span> Endpoints</a>
@@ -273,7 +296,7 @@
       <main class="main">
         <header class="hero" id="overview">
           <div>
-            <div class="brand"><span class="logo">{% if report_logo_data_uri %}<img src="{{ report_logo_data_uri }}" alt="BladeRecon report logo" style="width:100%;height:100%;object-fit:contain;border-radius:10px;">{% else %}&#x1F5E1;{% endif %}</span><span>BladeRecon</span></div>
+            <div class="brand"><span class="logo">{% if report_logo_data_uri %}<img src="{{ report_logo_data_uri }}" alt="BladeRecon report logo">{% else %}BR{% endif %}</span><span>BladeRecon</span></div>
             <h1>{{ target }}</h1>
             <p>Security assessment report with executive context, scan evidence, and raw data drill-downs.</p>
             <div class="hero-meta">
@@ -287,18 +310,19 @@
           <aside class="risk-panel" aria-label="Risk summary">
             <div class="risk-score">
               <div>
-                <div class="label">Risk Score</div>
-                <strong>{% if risk_score %}{{ risk_score.get("score", 0) }}{% else %}0{% endif %}</strong>
+                <div class="label">Research Opportunity Score</div>
+                <strong>{{ research_opportunity_score.get("score", 0) }}</strong>
                 <span class="muted">/100</span>
               </div>
-              <span class="risk-level">{% if risk_score %}{{ risk_score.get("level", "Not classified") }}{% else %}Not Run{% endif %}</span>
+              <span class="risk-level">{{ research_opportunity_score.get("level", "No Clear Lead") }}</span>
             </div>
             <div class="risk-panel-grid">
+              <div class="risk-mini"><div class="label">Program Risk</div><div class="value">{% if risk_score %}{{ risk_score.get("score", 0) }}/100{% else %}0/100{% endif %}</div></div>
               <div class="risk-mini"><div class="label">Findings</div><div class="value">{{ nuclei_status }}</div></div>
               <div class="risk-mini"><div class="label">Alive Hosts</div><div class="value">{{ alive_count }}</div></div>
-              <div class="risk-mini"><div class="label">Screenshots</div><div class="value">{{ screenshots_status }}</div></div>
-              <div class="risk-mini"><div class="label">Technologies</div><div class="value">{{ attack_surface.technology_count }}</div></div>
+              <div class="risk-mini"><div class="label">Top Lead</div><div class="value">{{ research_opportunity_score.get("top_target", "None") or "None" }}</div></div>
             </div>
+            <div class="note">Opportunity score ranks where to spend research time. Program risk summarizes broad exposure; it is not the same signal.</div>
           </aside>
         </header>
 
@@ -311,23 +335,224 @@
           </div>
         </div>
 
+        {% if next_investigation_targets %}
+        <section class="section card" id="where-start">
+          <div class="section-head">
+            <div>
+              <h2>Where Should I Start?</h2>
+              <small>The fastest path from recon data to manual bug bounty testing</small>
+            </div>
+          </div>
+          <div class="investigation-queue">
+            {% set lead = next_investigation_targets[0] %}
+            <div class="investigation-card primary">
+              <span class="label">Start here - score {{ lead.score | default(0) }}/100 - {{ lead.confidence | default("Low") }} confidence - {{ lead.validation_strength | default("None") }} validation</span>
+              <div class="lead-target">{{ lead.target }}</div>
+              <div><strong>Why investigate:</strong> {{ lead.reason }}</div>
+              <div class="action-line"><strong>Test first:</strong> {{ lead.suggested_testing | default("Manual verification") }}</div>
+              {% if lead.evidence_summary %}
+              <div class="chips">
+                {% for summary in lead.evidence_summary[:3] %}
+                <span class="chip">{{ summary }}</span>
+                {% endfor %}
+              </div>
+              {% endif %}
+              <details class="details-lite">
+                <summary>Evidence and validation details</summary>
+                <div>
+                  {% if lead.evidence %}
+                  <ul class="ranking-list">
+                    {% for evidence in lead.evidence[:3] %}
+                    <li><span>{{ evidence.type }}{% if evidence.source %} via {{ evidence.source }}{% endif %}</span><strong>{{ evidence.value }}</strong></li>
+                    {% endfor %}
+                  </ul>
+                  {% endif %}
+                  {% if lead.positive_validation_signals %}
+                  <div class="chips" style="margin-top: 10px;">
+                    {% for signal in lead.positive_validation_signals[:3] %}
+                    <span class="chip">+ {{ signal }}</span>
+                    {% endfor %}
+                  </div>
+                  {% endif %}
+                  {% if lead.negative_validation_signals %}
+                  <div class="chips" style="margin-top: 10px;">
+                    {% for signal in lead.negative_validation_signals[:2] %}
+                    <span class="chip">- {{ signal }}</span>
+                    {% endfor %}
+                  </div>
+                  {% endif %}
+                </div>
+              </details>
+            </div>
+            <div class="investigation-stack">
+              {% for item in next_investigation_targets[1:4] %}
+              <div class="investigation-card compact">
+                <span class="label">Next option - score {{ item.score | default(0) }}/100 - {{ item.confidence | default("Low") }}</span>
+                <div class="lead-target">{{ item.target }}</div>
+                <small>{{ item.reason }}</small>
+                <div class="note">Test first: {{ item.suggested_testing | default("Manual verification") }}</div>
+              </div>
+              {% endfor %}
+            </div>
+          </div>
+        </section>
+        {% endif %}
+
         <section class="section" id="executive-summary">
           <div class="section-head">
             <div>
               <h2>Executive Summary</h2>
-              <small>Operational totals from the completed scan</small>
+              <small>Decision dashboard for scan outcome and next action</small>
             </div>
           </div>
-          <div class="grid kpis">
-          <div class="card kpi-card executive-card"><div><div class="metric-icon">&#9670;</div><span class="metric-number">{{ attack_surface.total_assets }}</span></div><span class="metric-label">Total Assets</span></div>
-          <div class="card kpi-card"><div><div class="metric-icon">&#9679;</div><span class="metric-number">{{ alive_count }}</span></div><span class="metric-label">Alive Hosts</span></div>
-          <div class="card kpi-card"><div><div class="metric-icon">!</div><span class="metric-number {% if nuclei_status is string %}status-number{% endif %}">{{ nuclei_status }}</span></div><span class="metric-label">Findings Count</span></div>
-          <div class="card kpi-card" title="{{ screenshots_status }}"><div><div class="metric-icon">&#9638;</div><span class="metric-number {% if screenshots_skipped_reason %}status-number{% endif %}">{% if screenshots_skipped_reason %}Skipped{% else %}{{ screenshots_status }}{% endif %}</span><div class="metric-note">{% if screenshots_skipped_reason %}Dependency unavailable{% endif %}</div></div><span class="metric-label">Screenshots Captured</span></div>
-          <div class="card kpi-card"><div><div class="metric-icon">T</div><span class="metric-number">{{ attack_surface.technology_count }}</span></div><span class="metric-label">Technologies Detected</span></div>
-          <div class="card kpi-card" title="{{ parameters_status }}"><div><div class="metric-icon">&#35;</div><span class="metric-number {% if parameters_skipped_reason %}status-number{% endif %}">{% if parameters_skipped_reason %}Skipped{% else %}{{ parameters | length }}{% endif %}</span><div class="metric-note">{% if parameters_skipped_reason %}No URL surface{% endif %}</div></div><span class="metric-label">Parameters Found</span></div>
-          <div class="card kpi-card"><div><div class="metric-icon">/</div><span class="metric-number">{{ endpoints | length }}</span></div><span class="metric-label">Endpoints Found</span></div>
+          <div class="exec-dashboard">
+            <div class="card exec-card primary">
+              <div>
+                <span class="label">Opportunity Level</span>
+                <span class="exec-value">{{ research_opportunity_score.get("score", 0) }}/100</span>
+              </div>
+              <div class="exec-note">{{ research_opportunity_score.get("level", "No Clear Lead") }} - use the start-here queue before inventory.</div>
+            </div>
+            <div class="card exec-card">
+              <div>
+                <span class="label">Attack Surface</span>
+                <span class="exec-value">{{ alive_count }}</span>
+              </div>
+              <div class="exec-note">{{ attack_surface.total_assets }} total assets, {{ endpoints | length }} endpoint{{ "" if endpoints | length == 1 else "s" }}, {{ js_files | length }} JS file{{ "" if js_files | length == 1 else "s" }}.</div>
+            </div>
+            <div class="card exec-card">
+              <div>
+                <span class="label">Nuclei Outcome</span>
+                <span class="exec-value {% if nuclei_skipped_reason %}status-number{% endif %}">{% if nuclei_skipped_reason %}{{ nuclei_status_label }}{% else %}{{ nuclei_count }}{% endif %}</span>
+              </div>
+              <div class="exec-note">{% if nuclei_skipped_reason %}Skipped by ROI/runtime state. See details below.{% elif nuclei_count == 0 %}Completed with zero findings.{% else %}Finding count from executed templates.{% endif %}</div>
+            </div>
+            <div class="card exec-card">
+              <div>
+                <span class="label">Scan Outcome</span>
+                <span class="exec-value">{{ scan_duration }}</span>
+              </div>
+              <div class="exec-note">{{ screenshots_status }} screenshots; {{ parameters_status }} parameters; Program Risk {% if risk_score %}{{ risk_score.get("score", 0) }}/100{% else %}not scored{% endif %}.</div>
+            </div>
           </div>
         </section>
+
+        {% if investigation_campaigns %}
+        <section class="section card" id="top-investigation-campaigns">
+          <div class="section-head">
+            <div>
+              <h2>Top Investigation Campaigns</h2>
+              <small>Attack-surface clusters that reduce triage and focus manual testing</small>
+            </div>
+          </div>
+          <div class="ranking-grid">
+            {% for item in investigation_campaigns[:5] %}
+            <div class="ranking-card">
+              <span class="label">{{ item.confidence | default("Low") }} confidence - {{ item.validation_strength | default("None") }} validation - {{ item.opportunity_count | default(0) }} opportunities</span>
+              <div class="value">{{ item.name }}</div>
+              <small>{{ item.priority_reason }}</small>
+              <ul class="ranking-list" style="margin-top: 10px;">
+                <li><span>Average confidence</span><strong>{{ item.average_confidence | default("Low") }}</strong></li>
+                <li><span>Validation</span><strong>{{ item.validation_strength | default("None") }}</strong></li>
+              </ul>
+              {% if item.top_targets %}
+              <ul class="ranking-list" style="margin-top: 10px;">
+                {% for target in item.top_targets[:4] %}
+                <li><span>Target</span><strong>{{ target }}</strong></li>
+                {% endfor %}
+              </ul>
+              {% endif %}
+              <div class="note" style="margin-top: 10px;">Testing strategy: {{ item.suggested_testing_strategy }}</div>
+              <details class="details-lite" style="margin-top: 10px;">
+                <summary>Evidence and validation signals</summary>
+                <div>
+                  {% if item.evidence_summary %}
+                  <div class="chips">
+                    {% for summary in item.evidence_summary[:4] %}
+                    <span class="chip">{{ summary }}</span>
+                    {% endfor %}
+                  </div>
+                  {% endif %}
+                  {% if item.positive_validation_signals %}
+                  <div class="chips" style="margin-top: 10px;">
+                    {% for signal in item.positive_validation_signals[:3] %}
+                    <span class="chip">+ {{ signal }}</span>
+                    {% endfor %}
+                  </div>
+                  {% endif %}
+                  {% if item.negative_validation_signals %}
+                  <div class="chips" style="margin-top: 10px;">
+                    {% for signal in item.negative_validation_signals[:2] %}
+                    <span class="chip">- {{ signal }}</span>
+                    {% endfor %}
+                  </div>
+                  {% endif %}
+                </div>
+              </details>
+            </div>
+            {% endfor %}
+          </div>
+        </section>
+        {% endif %}
+
+        {% if next_investigation_targets %}
+        <section class="section card" id="top-investigation-targets">
+          <div class="section-head">
+            <div>
+              <h2>Top Investigation Targets</h2>
+              <small>Opportunity-first queue for the next manual testing session</small>
+            </div>
+          </div>
+          <div class="investigation-stack">
+            {% for item in next_investigation_targets[:5] %}
+            <div class="investigation-card {% if loop.first %}primary{% else %}compact{% endif %}">
+              <span class="label">{{ item.priority | default("Focused Review") }} - score {{ item.score | default(0) }}/100 - {{ item.confidence | default("Low") }} confidence - {{ item.validation_strength | default("None") }} validation</span>
+              <div class="lead-target">{{ item.target }}</div>
+              <div><strong>Why investigate:</strong> {{ item.reason }}</div>
+              <div class="action-line"><strong>Test first:</strong> {{ item.suggested_testing | default("Manual verification") }}</div>
+              <ul class="ranking-list">
+                <li><span>Indicators</span><strong>{{ item.indicator_count | default(0) }}</strong></li>
+                <li><span>Evidence sources</span><strong>{{ item.evidence_diversity | default(0) }}</strong></li>
+                <li><span>Correlation</span><strong>{{ item.correlation_strength | default(0) }}</strong></li>
+              </ul>
+              <details class="details-lite">
+                <summary>Supporting evidence and validation</summary>
+                <div>
+                  {% if item.evidence_summary %}
+                  <div class="chips">
+                    {% for summary in item.evidence_summary[:4] %}
+                    <span class="chip">{{ summary }}</span>
+                    {% endfor %}
+                  </div>
+                  {% endif %}
+                  {% if item.evidence %}
+                  <ul class="ranking-list" style="margin-top: 10px;">
+                    {% for evidence in item.evidence[:3] %}
+                    <li><span>{{ evidence.type }} evidence{% if evidence.source %} via {{ evidence.source }}{% endif %}</span><strong>{{ evidence.value }}</strong></li>
+                    {% endfor %}
+                  </ul>
+                  {% endif %}
+                  {% if item.positive_validation_signals %}
+                  <div class="chips" style="margin-top: 10px;">
+                    {% for signal in item.positive_validation_signals[:3] %}
+                    <span class="chip">+ {{ signal }}</span>
+                    {% endfor %}
+                  </div>
+                  {% endif %}
+                  {% if item.negative_validation_signals %}
+                  <div class="chips" style="margin-top: 10px;">
+                    {% for signal in item.negative_validation_signals[:2] %}
+                    <span class="chip">- {{ signal }}</span>
+                    {% endfor %}
+                  </div>
+                  {% endif %}
+                </div>
+              </details>
+            </div>
+            {% endfor %}
+          </div>
+        </section>
+        {% endif %}
 
         <section class="section card summary-card">
           <div class="section-head">
@@ -370,7 +595,7 @@
         <section class="section card" id="technology">
           <div class="section-head">
             <h2>Technology Overview</h2>
-            <small>{{ attack_surface.technology_count }} technologies detected</small>
+            <small>Technologies Detected: {{ attack_surface.technology_count }}</small>
           </div>
           {% if attack_surface.technologies or attack_surface.cdn_detected or attack_surface.waf_detected or attack_surface.servers %}
           {% if attack_surface.most_common_technologies %}
@@ -515,16 +740,7 @@
           </div>
           {% endif %}
           {% if next_investigation_targets %}
-          <div class="section-head" style="margin-top: 18px;"><h3>Suggested Next Targets</h3><small>Deterministic follow-up queue from priority, content, and historical signals</small></div>
-          <div class="ranking-grid">
-            {% for item in next_investigation_targets[:6] %}
-            <div class="ranking-card">
-              <span class="label">{{ item.type }}</span>
-              <div class="value">{{ item.target }}</div>
-              <small>{{ item.reason }}</small>
-            </div>
-            {% endfor %}
-          </div>
+          <div class="note" style="margin-top: 18px;">Top investigation targets are surfaced near the beginning of the report in Where Should I Start? Advanced Recon below keeps supporting inventory and source-quality details.</div>
           {% endif %}
           <details class="data-panel" style="margin-top: 18px;">
             <summary><span class="summary-title"><strong>Advanced Recon Details</strong><small>Historical diffs, header assets, paths, and historical JS findings</small></span><span class="summary-count">{{ advanced_metadata.get("requests_sent", 0) }} requests</span></summary>

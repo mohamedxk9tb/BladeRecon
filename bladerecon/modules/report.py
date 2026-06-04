@@ -33,7 +33,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from rich.console import Console
 
 from .. import __version__
-from .utils import REPORT_VERSION, check_playwright_chromium, deduplicate_alive_urls, deduplicate_parameters, deduplicate_subdomains, dependency_health, info, nuclei_template_status, print_module_summary, setup_logging, success, target_output_dir, warn
+from .utils import REPORT_VERSION, atomic_write_text, check_playwright_chromium, deduplicate_alive_urls, deduplicate_parameters, deduplicate_subdomains, dependency_health, info, nuclei_template_status, print_module_summary, setup_logging, success, target_output_dir, warn
 
 console = Console()
 
@@ -324,7 +324,45 @@ def _load_root_json(target_dir: Path, name: str, default: object) -> object:
         return default
 
 
-def _next_investigation_targets(asset_priority: dict, content_rows: List[dict], historical_diff: dict) -> List[dict]:
+def _next_investigation_targets(asset_priority: dict, content_rows: List[dict], historical_diff: dict, opportunity_priorities: Optional[List[dict]] = None) -> List[dict]:
+    if opportunity_priorities:
+        rows = []
+        for item in opportunity_priorities[:20]:
+            if not isinstance(item, dict):
+                continue
+            target = item.get("target") or item.get("host") or item.get("asset") or item.get("url") or ""
+            rows.append(
+                {
+                    "target": target,
+                    "type": item.get("opportunity_type", "Opportunity"),
+                    "reason": item.get("priority_reason", "High-value attack opportunity"),
+                    "priority": item.get("priority", "Focused Review"),
+                    "evidence": item.get("evidence", []),
+                    "evidence_summary": item.get("evidence_summary", []),
+                    "suggested_testing": item.get("suggested_testing", "Manual verification"),
+                    "score": item.get("score", 0),
+                    "confidence": item.get("confidence", "Low"),
+                    "indicator_count": item.get("indicator_count", 0),
+                    "evidence_diversity": item.get("evidence_diversity", 0),
+                    "correlation_strength": item.get("correlation_strength", 0),
+                    "validation_strength": item.get("validation_strength", "None"),
+                    "validation_score": item.get("validation_score", 0),
+                    "positive_validation_signals": item.get("positive_validation_signals", []),
+                    "negative_validation_signals": item.get("negative_validation_signals", []),
+                }
+            )
+        rows = [item for item in rows if item.get("target")]
+        rows.sort(
+            key=lambda item: (
+                int(item.get("score") or 0),
+                {"Very High": 4, "High": 3, "Medium": 2, "Low": 1}.get(str(item.get("confidence") or "Low"), 0),
+                {"Strong": 3, "Moderate": 2, "Weak": 1, "None": 0}.get(str(item.get("validation_strength") or "None"), 0),
+                int(item.get("evidence_diversity") or 0),
+                int(item.get("correlation_strength") or 0),
+            ),
+            reverse=True,
+        )
+        return rows[:12]
     targets: List[dict] = []
     if isinstance(asset_priority, dict):
         for item in asset_priority.get("top_assets", [])[:5]:
@@ -350,6 +388,184 @@ def _next_investigation_targets(asset_priority: dict, content_rows: List[dict], 
         seen.add(key)
         deduped.append(item)
     return deduped[:8]
+
+
+CAMPAIGN_DEFINITIONS = {
+    "API Ecosystem": {
+        "types": {"API", "GraphQL", "Parameters"},
+        "tokens": ("api", "graphql", "swagger", "openapi", "/v1", "/v2", "/v3", "parameter"),
+        "strategy": "Authorization testing, IDOR, version diffing, GraphQL introspection, mass assignment, parameter tampering",
+    },
+    "Administrative Surface": {
+        "types": {"Admin"},
+        "tokens": ("admin", "dashboard", "console", "manage", "management"),
+        "strategy": "Access control review, authentication bypass testing, default credential checks, unauthenticated sub-path review",
+    },
+    "Authentication Surface": {
+        "types": {"Authentication"},
+        "tokens": ("login", "signin", "auth", "oauth", "sso", "account", "session"),
+        "strategy": "Session handling, OAuth flow review, password reset testing, authorization boundary checks",
+    },
+    "Debug Surface": {
+        "types": {"Debug"},
+        "tokens": ("debug", "trace", "metrics", "actuator", "health", "diagnostic"),
+        "strategy": "Information disclosure testing, stack trace review, environment/config leakage checks, internal service exposure review",
+    },
+    "Historical Functionality": {
+        "types": {"Historical"},
+        "tokens": ("historical", "legacy", "deprecated", "old", "removed", "beta"),
+        "strategy": "Legacy authorization checks, deprecated parameter handling, version behavior comparison, forgotten endpoint testing",
+    },
+}
+
+
+def _campaign_confidence(opportunity_count: int, evidence_diversity: int, correlation_strength: int, historical_support: int) -> str:
+    if correlation_strength >= 8 or (opportunity_count >= 3 and evidence_diversity >= 4 and historical_support):
+        return "Very High"
+    if correlation_strength >= 5 or (opportunity_count >= 2 and evidence_diversity >= 3):
+        return "High"
+    if correlation_strength >= 2 or evidence_diversity >= 2:
+        return "Medium"
+    return "Low"
+
+
+def _label_from_average(value: float) -> str:
+    if value > 3.5:
+        return "Very High"
+    if value >= 2.5:
+        return "High"
+    if value >= 1.5:
+        return "Medium"
+    return "Low"
+
+
+def _campaign_validation_strength(members: List[dict]) -> str:
+    if not members:
+        return "None"
+    scores = {"None": 0, "Weak": 1, "Moderate": 2, "Strong": 3}
+    average = sum(scores.get(str(item.get("validation_strength") or "None"), 0) for item in members) / len(members)
+    if average >= 2.5:
+        return "Strong"
+    if average >= 1.5:
+        return "Moderate"
+    if average >= 0.5:
+        return "Weak"
+    return "None"
+
+
+def _campaign_matches(item: dict, definition: dict) -> bool:
+    types = {str(value) for value in item.get("opportunity_types", []) if str(value)}
+    if str(item.get("type") or ""):
+        types.add(str(item.get("type")))
+    if types.intersection(definition["types"]):
+        return True
+    text_parts = [
+        str(item.get("target") or ""),
+        str(item.get("reason") or ""),
+        str(item.get("suggested_testing") or ""),
+        " ".join(str(value) for value in item.get("evidence_summary", []) if str(value)),
+    ]
+    for evidence in item.get("evidence", []) if isinstance(item.get("evidence"), list) else []:
+        if isinstance(evidence, dict):
+            text_parts.extend([str(evidence.get("type") or ""), str(evidence.get("value") or ""), str(evidence.get("reason") or ""), str(evidence.get("source") or "")])
+    text = " ".join(text_parts).lower()
+    return any(token in text for token in definition["tokens"])
+
+
+def _build_investigation_campaigns(next_targets: List[dict]) -> List[dict]:
+    campaigns: List[dict] = []
+    for name, definition in CAMPAIGN_DEFINITIONS.items():
+        members = [item for item in next_targets if isinstance(item, dict) and _campaign_matches(item, definition)]
+        if not members:
+            continue
+        evidence_sources = set()
+        evidence_summary = []
+        positive_validation_signals = []
+        negative_validation_signals = []
+        historical_support = 0
+        for item in members:
+            for signal in item.get("positive_validation_signals", []) if isinstance(item.get("positive_validation_signals"), list) else []:
+                value = str(signal)
+                if value and value not in positive_validation_signals:
+                    positive_validation_signals.append(value)
+            for signal in item.get("negative_validation_signals", []) if isinstance(item.get("negative_validation_signals"), list) else []:
+                value = str(signal)
+                if value and value not in negative_validation_signals:
+                    negative_validation_signals.append(value)
+            for summary in item.get("evidence_summary", []) if isinstance(item.get("evidence_summary"), list) else []:
+                value = str(summary)
+                if value and value not in evidence_summary:
+                    evidence_summary.append(value)
+            for evidence in item.get("evidence", []) if isinstance(item.get("evidence"), list) else []:
+                if not isinstance(evidence, dict):
+                    continue
+                source = str(evidence.get("source") or "")
+                if source:
+                    evidence_sources.add(source)
+                if "historical" in source.lower() or "historical" in str(evidence.get("reason") or "").lower():
+                    historical_support += 1
+                reason = str(evidence.get("reason") or "")
+                if reason and reason not in evidence_summary:
+                    evidence_summary.append(reason)
+        opportunity_count = len(members)
+        evidence_diversity = len(evidence_sources)
+        correlation_strength = sum(int(item.get("correlation_strength") or 0) for item in members)
+        max_score = max(int(item.get("score") or 0) for item in members)
+        confidence = _campaign_confidence(opportunity_count, evidence_diversity, correlation_strength, historical_support)
+        confidence_scores = {"Very High": 4, "High": 3, "Medium": 2, "Low": 1}
+        average_confidence = _label_from_average(sum(confidence_scores.get(str(item.get("confidence") or "Low"), 1) for item in members) / opportunity_count)
+        validation_strength = _campaign_validation_strength(members)
+        campaigns.append(
+            {
+                "name": name,
+                "opportunity_count": opportunity_count,
+                "confidence": confidence,
+                "average_confidence": average_confidence,
+                "validation_strength": validation_strength,
+                "positive_validation_signals": positive_validation_signals[:6],
+                "negative_validation_signals": negative_validation_signals[:6],
+                "evidence_summary": evidence_summary[:6],
+                "priority_reason": f"{opportunity_count} related {name.lower()} opportunities with {evidence_diversity} unique evidence sources"
+                + (" and historical support." if historical_support else "."),
+                "suggested_testing_strategy": definition["strategy"],
+                "top_targets": [item.get("target", "") for item in members[:5] if item.get("target")],
+                "max_score": max_score,
+                "correlation_strength": correlation_strength,
+                "evidence_diversity": evidence_diversity,
+                "historical_support": historical_support,
+            }
+        )
+    campaigns.sort(
+        key=lambda item: (
+            {"Very High": 4, "High": 3, "Medium": 2, "Low": 1}.get(str(item.get("confidence")), 0),
+            int(item.get("max_score") or 0),
+            int(item.get("opportunity_count") or 0),
+            int(item.get("evidence_diversity") or 0),
+        ),
+        reverse=True,
+    )
+    return campaigns[:10]
+
+
+def _research_opportunity_score(next_targets: List[dict], campaigns: List[dict]) -> Dict[str, object]:
+    if not next_targets:
+        return {"score": 0, "level": "No Clear Lead", "reason": "No prioritized investigation targets were generated.", "top_target": ""}
+    validation_bonus = {"None": 0, "Weak": 3, "Moderate": 8, "Strong": 12}
+    confidence_bonus = {"Low": 0, "Medium": 4, "High": 8, "Very High": 12}
+    top = next_targets[0]
+    score = int(top.get("score") or 0)
+    score += validation_bonus.get(str(top.get("validation_strength") or "None"), 0)
+    score += confidence_bonus.get(str(top.get("confidence") or "Low"), 0)
+    if campaigns:
+        score += min(8, len(campaigns) * 2)
+    score = max(0, min(100, score))
+    level = "High" if score >= 75 else "Medium" if score >= 45 else "Low"
+    return {
+        "score": score,
+        "level": level,
+        "reason": str(top.get("reason") or "Top prioritized opportunity"),
+        "top_target": str(top.get("target") or ""),
+    }
 
 
 def _load_intelligence_file(target_dir: Path, name: str, default: object) -> object:
@@ -436,10 +652,12 @@ def _load_scan_state(target_dir: Path) -> dict:
         return {}
 
 
-def _asset_data_uri(path: Path) -> str:
+def _asset_data_uri(path: Path, max_bytes: int = 2_500_000) -> str:
     if not path.exists() or not path.is_file():
         return ""
     try:
+        if path.stat().st_size > max_bytes:
+            return ""
         mime = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
         payload = base64.b64encode(path.read_bytes()).decode("ascii")
         return f"data:{mime};base64,{payload}"
@@ -842,6 +1060,61 @@ def _render_markdown(context: dict, out_md: Path) -> None:
         lines.append(f"- Scan duration: {context.get('scan_duration')}")
     lines.append("")
 
+    research_score = context.get("research_opportunity_score", {}) if isinstance(context.get("research_opportunity_score"), dict) else {}
+    risk_score = context.get("risk_score", {})
+    lines.append("## Scores")
+    lines.append("")
+    lines.append(f"- Research Opportunity Score: {research_score.get('score', 0)}/100 ({research_score.get('level', 'No Clear Lead')})")
+    if risk_score:
+        lines.append(f"- Program Risk Score: {risk_score.get('score', 0)}/100 ({risk_score.get('level', 'Not classified')})")
+    lines.append("- Interpretation: Research Opportunity Score ranks where manual testing should start; Program Risk Score summarizes broad exposure and should not be treated as the same signal.")
+    lines.append("")
+
+    next_targets = context.get("next_investigation_targets", [])
+    if next_targets:
+        lines.append("## Where Should I Start?")
+        lines.append("")
+        for index, item in enumerate(next_targets[:5], start=1):
+            summary_rows = item.get("evidence_summary", []) if isinstance(item.get("evidence_summary"), list) else []
+            positive_rows = item.get("positive_validation_signals", []) if isinstance(item.get("positive_validation_signals"), list) else []
+            lines.append(f"### {index}. {item.get('target', '')}")
+            lines.append("")
+            lines.append(f"- Priority: {item.get('priority', 'Focused Review')}")
+            lines.append(f"- Why investigate: {item.get('reason', 'High-value attack opportunity')}")
+            lines.append(f"- Score: {item.get('score', 0)}/100; confidence: {item.get('confidence', 'Low')}; validation: {item.get('validation_strength', 'None')}")
+            lines.append(f"- Test first: {item.get('suggested_testing', 'Manual verification')}")
+            if summary_rows:
+                lines.append(f"- Evidence summary: {'; '.join(str(row) for row in summary_rows[:3])}")
+            if positive_rows:
+                lines.append(f"- Confirming signal: {'; '.join(str(row) for row in positive_rows[:2])}")
+            lines.append("")
+        lines.append("## Top Investigation Targets")
+        lines.append("")
+        lines.append("See the focused target cards in **Where Should I Start?**. Inventory-heavy target details are kept lower in the report.")
+        lines.append("")
+
+    campaigns = context.get("investigation_campaigns", [])
+    if campaigns:
+        lines.append("## Top Investigation Campaigns")
+        lines.append("")
+        for index, item in enumerate(campaigns[:5], start=1):
+            evidence = "; ".join(str(row) for row in item.get("evidence_summary", [])[:4]) if isinstance(item.get("evidence_summary"), list) else ""
+            positives = "; ".join(str(row) for row in item.get("positive_validation_signals", [])[:3]) if isinstance(item.get("positive_validation_signals"), list) else ""
+            top_targets = "; ".join(str(row) for row in item.get("top_targets", [])[:3]) if isinstance(item.get("top_targets"), list) else ""
+            lines.append(f"### {index}. {item.get('name', '')}")
+            lines.append("")
+            lines.append(f"- Why this campaign: {item.get('priority_reason', 'Related attack surface cluster')}")
+            lines.append(f"- Confidence: {item.get('confidence', 'Low')} (average {item.get('average_confidence', 'Low')}); validation: {item.get('validation_strength', 'None')}")
+            lines.append(f"- Test strategy: {item.get('suggested_testing_strategy', 'Manual testing')}")
+            if top_targets:
+                lines.append(f"- Top targets: {top_targets}")
+            if evidence:
+                lines.append(f"- Evidence: {evidence}")
+            if positives:
+                lines.append(f"- Confirming signals: {positives}")
+            lines.append("")
+        lines.append("")
+
     perf = context.get("performance", {})
     lines.append("## Performance Analytics")
     lines.append("")
@@ -908,7 +1181,7 @@ def _render_markdown(context: dict, out_md: Path) -> None:
     lines.append("## Intelligence")
     lines.append("")
     if risk_score:
-        lines.append(f"- Risk Score: {risk_score.get('score', 0)}/100 ({risk_score.get('level', 'Not classified')})")
+        lines.append(f"- Program Risk Score: {risk_score.get('score', 0)}/100 ({risk_score.get('level', 'Not classified')})")
         for factor in risk_score.get("factors", []):
             lines.append(f"  - {factor}")
     if infrastructure:
@@ -998,10 +1271,9 @@ def _render_markdown(context: dict, out_md: Path) -> None:
         lines.append("")
     next_targets = context.get("next_investigation_targets", [])
     if next_targets:
-        lines.append("### Suggested Next Investigation Targets")
+        lines.append("### Investigation Queue Reference")
         lines.append("")
-        for item in next_targets:
-            lines.append(f"- {item.get('target')} - {item.get('type')}: {item.get('reason')}")
+        lines.append("Top target cards are shown near the beginning of the report under **Where Should I Start?**.")
         lines.append("")
     if not context.get("parameters_skipped_reason"):
         lines.append(f"- Discovered Parameters: {param_intel.get('discovered_count', 0)}")
@@ -1066,7 +1338,7 @@ def _render_markdown(context: dict, out_md: Path) -> None:
             lines.append(f"- **{name}** on {host}")
         lines.append("")
 
-    out_md.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(out_md, "\n".join(lines), encoding="utf-8")
 
 
 def _render_html(context: dict, out_html: Path) -> None:
@@ -1076,7 +1348,7 @@ def _render_html(context: dict, out_html: Path) -> None:
     )
     tpl = env.get_template("report.html.j2")
     html = tpl.render(**context)
-    out_html.write_text(html, encoding="utf-8")
+    atomic_write_text(out_html, html, encoding="utf-8")
 
 
 def _display_path(path: Path) -> Path:
@@ -1128,6 +1400,7 @@ def run(target: str, output: Path = Path("results"), scan_duration: Optional[str
     risk_score = _load_intelligence_file(target_dir, "risk_score.json", {})
     template_intelligence = _load_intelligence_file(target_dir, "template_intelligence.json", {})
     intelligence_attack_surface = _load_intelligence_file(target_dir, "attack_surface.json", {})
+    opportunity_priorities = _load_intelligence_file(target_dir, "opportunity_priorities.json", [])
     historical_metadata = _load_json_list(target_dir / "historical" / "urls.json")
     historical_endpoints = _load_json_list(target_dir / "historical" / "endpoints.json")
     historical_diff = _load_root_json(target_dir, "historical_diff.json", {})
@@ -1138,7 +1411,14 @@ def run(target: str, output: Path = Path("results"), scan_duration: Optional[str
         "endpoints": _load_json_list(target_dir / "historical_js" / "endpoints.json"),
     }
     asset_priority = _load_root_json(target_dir, "asset_priority.json", {})
-    next_targets = _next_investigation_targets(asset_priority if isinstance(asset_priority, dict) else {}, content_discovery, historical_diff if isinstance(historical_diff, dict) else {})
+    next_targets = _next_investigation_targets(
+        asset_priority if isinstance(asset_priority, dict) else {},
+        content_discovery,
+        historical_diff if isinstance(historical_diff, dict) else {},
+        opportunity_priorities if isinstance(opportunity_priorities, list) else [],
+    )
+    investigation_campaigns = _build_investigation_campaigns(next_targets)
+    research_opportunity_score = _research_opportunity_score(next_targets, investigation_campaigns)
     advanced_metadata = _load_root_json(target_dir, "advanced_metadata.json", {})
     probe_results = _load_probe_results(target_dir)
     technology_results = _load_technology_results(target_dir)
@@ -1234,6 +1514,7 @@ def run(target: str, output: Path = Path("results"), scan_duration: Optional[str
         "risk_score": risk_score if isinstance(risk_score, dict) else {},
         "template_intelligence": template_intelligence if isinstance(template_intelligence, dict) else {},
         "intelligence_attack_surface": intelligence_attack_surface if isinstance(intelligence_attack_surface, dict) else {},
+        "opportunity_priorities": opportunity_priorities if isinstance(opportunity_priorities, list) else [],
         "historical_urls": historical_metadata,
         "historical_endpoints": historical_endpoints,
         "historical_diff": historical_diff if isinstance(historical_diff, dict) else {},
@@ -1242,6 +1523,8 @@ def run(target: str, output: Path = Path("results"), scan_duration: Optional[str
         "historical_js": historical_js,
         "asset_priority": asset_priority if isinstance(asset_priority, dict) else {},
         "next_investigation_targets": next_targets,
+        "investigation_campaigns": investigation_campaigns,
+        "research_opportunity_score": research_opportunity_score,
         "advanced_metadata": advanced_metadata if isinstance(advanced_metadata, dict) else {},
         "nuclei_count": nuclei_count,
         "nuclei_available": nuclei_available,

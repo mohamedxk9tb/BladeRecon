@@ -10,7 +10,7 @@ import hashlib
 import json
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -33,6 +33,7 @@ from .utils import (
     log_duration,
     normalize_scan_profile,
     ProgressReporter,
+    atomic_write_text,
     prepare_module_output,
     print_module_summary,
     setup_logging,
@@ -59,6 +60,62 @@ def _load_probe_rows(target_dir: Path) -> List[Dict[str, object]]:
         return data if isinstance(data, list) else []
     except Exception:
         return []
+
+
+def _load_historical_js_candidates(target_dir: Path) -> List[str]:
+    urls: List[str] = []
+    historical_js_path = target_dir / "historical_js" / "js_urls.json"
+    if historical_js_path.exists():
+        try:
+            data = json.loads(historical_js_path.read_text(encoding="utf-8-sig"))
+        except Exception:
+            data = []
+        for item in data if isinstance(data, list) else []:
+            value = item.get("url") if isinstance(item, dict) else item
+            if value:
+                urls.append(str(value))
+
+    historical_urls_path = target_dir / "historical" / "urls.json"
+    if historical_urls_path.exists():
+        try:
+            data = json.loads(historical_urls_path.read_text(encoding="utf-8-sig"))
+        except Exception:
+            data = []
+        for item in data if isinstance(data, list) else []:
+            value = item.get("url") if isinstance(item, dict) else item
+            if value and ".js" in str(value).lower():
+                urls.append(str(value))
+
+    historical_urls_txt = target_dir / "historical" / "urls.txt"
+    if historical_urls_txt.exists():
+        for line in historical_urls_txt.read_text(encoding="utf-8-sig").splitlines():
+            if ".js" in line.lower():
+                urls.append(line.strip())
+    return dedupe_preserve_order(urls)
+
+
+async def _prime_historical_js_candidates(target_dir: Path, domain: str, output: Path, config: dict, profile: str, resume: bool) -> List[str]:
+    """Collect bounded historical URLs early so blocked live HTML can still feed JS analysis."""
+    if not bool(config_get(config, "js.historical_fallback_enabled", True)):
+        return []
+    existing_candidates = _load_historical_js_candidates(target_dir)
+    if existing_candidates:
+        return existing_candidates
+    try:
+        from .advanced import collect_historical
+
+        info("Live JavaScript discovery found no scripts; checking bounded historical URLs for JS assets")
+        await collect_historical(domain, output, config, profile, resume=resume)
+        metadata_path = target_dir / "historical" / "metadata.json"
+        if metadata_path.exists():
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
+            if isinstance(metadata, dict):
+                metadata["generated_by"] = "js_historical_fallback"
+                write_json(metadata_path, metadata)
+    except Exception as exc:
+        warn(f"Historical JavaScript fallback unavailable: {exc}")
+        return []
+    return _load_historical_js_candidates(target_dir)
 
 
 def _host(url: str) -> str:
@@ -190,7 +247,10 @@ async def _collect_js(
     user_agent: Optional[str],
     random_user_agent: bool,
     profile: Optional[str],
-) -> List[Dict[str, object]]:
+    domain: str,
+    output: Path,
+    resume: bool,
+) -> Tuple[List[Dict[str, object]], Dict[str, object]]:
     active_profile = normalize_scan_profile(profile, config)
     html_ceiling = get_profiled_ceiling("js_html", 40, active_profile, config)
     alive_hosts, _html_skipped = limit_items_with_notice(alive_hosts, html_ceiling, "JavaScript HTML requests")
@@ -200,6 +260,14 @@ async def _collect_js(
     sem = asyncio.Semaphore(max(1, concurrency))
     host_sems: Dict[str, asyncio.Semaphore] = {}
     js_by_url: Dict[str, Dict[str, object]] = {}
+    stats: Dict[str, object] = {
+        "html_failures": 0,
+        "blocked_pages": 0,
+        "discovered_script_urls": 0,
+        "historical_fallback_urls": 0,
+        "download_failures": 0,
+        "skipped_large_js": 0,
+    }
     files_dir = out_dir / "files"
     files_dir.mkdir(parents=True, exist_ok=True)
 
@@ -223,6 +291,9 @@ async def _collect_js(
                         await limiter.wait()
                         html = await _fetch_text(client, page_url, timeout)
             except Exception as exc:
+                stats["html_failures"] = int(stats["html_failures"]) + 1
+                if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None and exc.response.status_code in {401, 403, 429}:
+                    stats["blocked_pages"] = int(stats["blocked_pages"]) + 1
                 warn(f"Unable to fetch HTML: {page_url} ({exc})")
                 html_completed += 1
                 html_reporter.update(html_completed)
@@ -235,11 +306,20 @@ async def _collect_js(
 
         await asyncio.gather(*(handle_page(host) for host in alive_hosts), return_exceptions=True)
         html_reporter.update(html_completed, force=True)
+        if not js_by_url:
+            fallback_urls = _load_historical_js_candidates(out_dir.parent)
+            if not fallback_urls:
+                fallback_urls = await _prime_historical_js_candidates(out_dir.parent, domain, output, config, active_profile, resume)
+            for js_url in fallback_urls:
+                js_by_url.setdefault(js_url, {"url": js_url, "source_page": "historical_js"})
+            stats["historical_fallback_urls"] = len(fallback_urls)
         discovered_js_count = len(js_by_url)
+        stats["discovered_script_urls"] = discovered_js_count
         if js_download_ceiling > 0 and discovered_js_count > js_download_ceiling:
             warn(f"JavaScript downloads capped at {js_download_ceiling} of {discovered_js_count} asset(s) by active safety profile")
             js_by_url = dict(list(js_by_url.items())[:js_download_ceiling])
         js_reporter = ProgressReporter("JavaScript Downloads", total=len(js_by_url), interval=10)
+        max_js_bytes = int(config_get(config, "js.max_file_bytes", 500000) or 500000)
 
         async def handle_js(item: Dict[str, object]) -> None:
             nonlocal js_completed
@@ -254,8 +334,12 @@ async def _collect_js(
                         content_type = resp.headers.get("content-type", "")
                         if "javascript" not in content_type.lower() and not urlparse(url).path.lower().endswith(".js"):
                             return
+                        if max_js_bytes > 0 and len(resp.content) > max_js_bytes:
+                            stats["skipped_large_js"] = int(stats["skipped_large_js"]) + 1
+                            warn(f"Skipping oversized JS asset: {url} ({len(resp.content)} bytes)")
+                            return
                         local_path = files_dir / _safe_js_name(url)
-                        local_path.write_text(resp.text, encoding="utf-8", errors="ignore")
+                        atomic_write_text(local_path, resp.text, encoding="utf-8")
                         item.update(
                             {
                                 "status_code": resp.status_code,
@@ -264,6 +348,7 @@ async def _collect_js(
                             }
                         )
             except Exception as exc:
+                stats["download_failures"] = int(stats["download_failures"]) + 1
                 warn(f"Skipping broken JS link: {url} ({exc})")
             finally:
                 js_completed += 1
@@ -274,7 +359,7 @@ async def _collect_js(
         if js_reporter:
             js_reporter.update(js_completed, force=True)
 
-    return [item for item in js_by_url.values() if item.get("local_path")]
+    return [item for item in js_by_url.values() if item.get("local_path")], stats
 
 
 def run(
@@ -298,11 +383,32 @@ def run(
     alive_hosts = _load_alive_hosts(target_dir)
     if not alive_hosts:
         warn("No alive hosts found. Run probe before js.")
+        rows: List[Dict[str, object]] = []
+        atomic_write_text(out_dir / "js_files.txt", "", encoding="utf-8")
+        write_json(out_dir / "js_files.json", rows)
+        write_json(
+            out_dir / "metadata.json",
+            {
+                "alive_hosts": 0,
+                "html_requests": 0,
+                "html_hosts_skipped": 0,
+                "download_requests": 0,
+                "results_found": 0,
+                "discovered_script_urls": 0,
+                "html_failures": 0,
+                "blocked_pages": 0,
+                "historical_fallback_urls": 0,
+                "download_failures": 0,
+                "skipped_large_js": 0,
+                "status": "completed_empty",
+                "reason": "no_alive_hosts",
+            },
+        )
         print_module_summary(
             "JavaScript Summary",
             {"Target": domain, "Duration": "0.00s", "Alive Hosts": 0, "Results Found": 0, "Output Location": out_dir},
         )
-        return []
+        return rows
 
     active_profile = normalize_scan_profile(profile, config)
     resolved_concurrency = max(1, int(concurrency or get_profiled_concurrency("js", int(config_get(config, "concurrency.js", 10)), active_profile, config)))
@@ -321,7 +427,7 @@ def run(
 
     try:
         with log_duration(log, "js"):
-            rows = asyncio.run(
+            rows, collection_stats = asyncio.run(
                 _collect_js(
                     alive_hosts,
                     out_dir,
@@ -332,15 +438,19 @@ def run(
                     user_agent,
                     random_user_agent,
                     active_profile,
+                    domain,
+                    output,
+                    resume,
                 )
             )
     except Exception as exc:
         log.exception("JavaScript recon failed")
         warn(f"JavaScript recon failed: {exc}")
         rows = []
+        collection_stats = {"html_failures": len(alive_hosts), "blocked_pages": 0, "discovered_script_urls": 0, "historical_fallback_urls": 0, "download_failures": 0, "skipped_large_js": 0}
 
     urls = dedupe_preserve_order(str(row["url"]) for row in rows)
-    (out_dir / "js_files.txt").write_text("\n".join(urls), encoding="utf-8")
+    atomic_write_text(out_dir / "js_files.txt", "\n".join(urls), encoding="utf-8")
     write_json(out_dir / "js_files.json", rows)
     write_json(
         out_dir / "metadata.json",
@@ -350,6 +460,12 @@ def run(
             "html_hosts_skipped": max(0, original_alive_count - len(alive_hosts)),
             "download_requests": len(rows),
             "results_found": len(urls),
+            "discovered_script_urls": int(collection_stats.get("discovered_script_urls", 0)),
+            "html_failures": int(collection_stats.get("html_failures", 0)),
+            "blocked_pages": int(collection_stats.get("blocked_pages", 0)),
+            "historical_fallback_urls": int(collection_stats.get("historical_fallback_urls", 0)),
+            "download_failures": int(collection_stats.get("download_failures", 0)),
+            "skipped_large_js": int(collection_stats.get("skipped_large_js", 0)),
             "concurrency": resolved_concurrency,
             "per_host_concurrency": get_profiled_per_host_concurrency("js", 2, active_profile, config),
             "rate_limit_per_second": get_profiled_rate_limit("js", 6, active_profile, config),

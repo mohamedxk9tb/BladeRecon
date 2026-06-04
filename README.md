@@ -29,13 +29,6 @@ It is designed to be:
 
 It is not intended to replace Amass, distributed recon stacks, or enterprise scanners.
 
-## Media Preview
-
-Additional release media is stored in `assets/`:
-
-- `logo.png`: square project mark
-- `report-logo.png`: report branding used inside generated reports
-- `social-preview.png`: repository/social preview that communicates the project identity
 
 ### CLI Preview
 
@@ -65,15 +58,15 @@ Data policy: sanitized sample data with zero fake findings.
 | --- | --- |
 | Subdomains | Passive sources, source attribution, cache, optional lightweight DNS expansion |
 | Probe | Alive hosts, status codes, redirects, titles, content length, server/CDN/WAF hints |
-| JavaScript | Finds external JavaScript assets from alive hosts |
-| Endpoints | Extracts endpoint candidates from downloaded JavaScript |
+| JavaScript | Finds external JavaScript assets from alive hosts and can reuse historical JS when live HTML is blocked |
+| Endpoints | Extracts endpoint candidates from downloaded and historical JavaScript |
 | Secrets | Informational secret pattern detection with confidence and risk labels |
 | Parameters | Historical URL sources plus local fallback URL inventory and wordlist candidates |
 | Screenshots | Optional Playwright screenshots with duplicate/placeholder filtering |
 | Intelligence | Technology, infrastructure, cloud asset, risk, and template-selection context |
 | Advanced Recon | Historical URLs, historical JS, low-noise content discovery, security-header assets, and explainable asset prioritization |
-| Nuclei | Optional Nuclei wrapper with safe, balanced, aggressive, intelligence-guided profiles, and a lightweight baseline safety net |
-| Reports | Dark-theme offline HTML and Markdown reports with KPI cards, section search, exports, intelligence summaries, priority reasons, and performance analytics |
+| Nuclei | Optional Nuclei wrapper with safe, balanced, aggressive, intelligence-guided profiles, ROI gating, and a lightweight baseline safety net when justified |
+| Reports | Dark-theme offline HTML and Markdown reports with a Where Should I Start dashboard, separated research/risk scoring, section search, exports, intelligence summaries, priority reasons, and performance analytics |
 | Safety | Safety profiles, request ceilings, per-host concurrency, rate limits, and Nuclei timeout reporting |
 | Utilities | Doctor, repair, cache management, resume state, and install helper |
 
@@ -223,9 +216,17 @@ bladerecon full hackerone.com --profile safe
 The active profile is written to `scan_state.json`, module metadata, and the HTML report.
 
 Smart Nuclei keeps technology-guided tag selection, but it is no longer the
-only coverage layer. When tags are selected automatically, BladeRecon also runs
-a lightweight tag-free baseline pass for `critical,high` severities. Reports and
-`nuclei/metadata.json` show `coverage_strategy` plus the `baseline_scan` status.
+only coverage layer. When tags are selected automatically, BladeRecon may run
+a lightweight tag-free baseline pass for `critical,high` severities, but only
+for uncovered high-confidence or validated opportunity hosts. When no tags,
+validated attack surface, or high-confidence opportunities exist, the ROI gate
+skips baseline-only Nuclei instead of spending runtime on low-value templates.
+If the ROI gate justifies a baseline-only run, BladeRecon scopes the target list
+to the validated or high-confidence opportunity hosts first instead of scanning
+every alive host. Reports and `nuclei/metadata.json` show
+`coverage_strategy`, `roi_decision`, `target_scope`, `baseline_reason`,
+`baseline_skip_reason`, `baseline_roi`, `baseline_targets`, and the
+`baseline_scan` status.
 Explicit `--templates` paths can point to a single Nuclei template file or a
 directory of custom templates; they do not need the official template repository
 layout.
@@ -252,7 +253,8 @@ results/
     |   `-- files/
     |-- endpoints/
     |   |-- endpoints.txt
-    |   `-- endpoints.json
+    |   |-- endpoints.json
+    |   `-- metadata.json
     |-- secrets/
     |   |-- secrets.txt
     |   `-- secrets.json
@@ -319,6 +321,21 @@ bladerecon screenshot hackerone.com
 ```
 
 If Chromium is missing, BladeRecon displays a skip reason and continues.
+Screenshot metadata includes average capture time, slow targets, timeout
+targets, and per-target timings so slow browser captures are visible instead of
+hidden inside total runtime.
+
+## Signal Quality
+
+Endpoint discovery suppresses third-party API URLs found inside in-scope
+JavaScript unless the endpoint host is in scope. Historical JS endpoint
+artifacts are merged into the same endpoint output so blocked live pages can
+still contribute attack-surface evidence.
+
+Advanced recon metadata includes source-level ROI for historical URL sources,
+including selected URLs, opportunity candidates, source duration, and
+signal-to-noise ratios. Use this to decide whether a source is worth its runtime
+on future scans.
 
 ## Roadmap
 

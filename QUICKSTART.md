@@ -84,6 +84,8 @@ results/hackerone.com/reports/report.html
 The report is offline and includes:
 
 - Active safety profile
+- A **Where Should I Start?** dashboard with the next targets to investigate
+- Separate Research Opportunity Score and Program Risk Score
 - Attack-surface summary
 - Performance Analytics
 - Subdomains
@@ -96,6 +98,9 @@ The report is offline and includes:
 - Secret pattern findings
 - Screenshots if available
 - Nuclei findings if available, including Smart Nuclei baseline safety-net status
+
+Start with **Where Should I Start?** before reading inventory sections. It shows
+why a target matters, what to test first, and the strongest supporting signals.
 
 The README showcase images live under `assets/` and use sanitized `example.com`
 data only.

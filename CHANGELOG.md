@@ -3,7 +3,17 @@
 ## 0.2.0 - 2026-05-29
 
 - Added Advanced Recon intelligence with historical URL collection, historical endpoint/parameter extraction, historical attack-surface correlation, historical JavaScript analysis, low-noise content discovery, security-header asset discovery, and asset prioritization.
-- Refined Smart Nuclei to pair technology-tag selection with a lightweight `critical,high` baseline safety net and report the coverage strategy in metadata and reports.
+- Refined Smart Nuclei to pair technology-tag selection with a lightweight `critical,high` baseline safety net when ROI is justified, skip baseline-only scans without opportunity evidence, scope justified baseline-only runs to validated opportunity hosts, and report the coverage strategy in metadata and reports.
+- Hardened Smart Nuclei baseline ROI further so post-tag baselines only run for uncovered high-confidence or validated opportunity hosts, with explicit baseline reason, skip reason, ROI, and target metadata.
+- Hardened historical JavaScript reuse so blocked live pages can still feed endpoint and secret extraction when historical JS artifacts exist.
+- Added endpoint signal controls that suppress third-party API noise while preserving in-scope endpoints recovered from live and historical JavaScript.
+- Added screenshot timing telemetry and Advanced Recon source-level ROI metrics to expose slow captures and low-yield historical sources.
+- Added report dashboard guidance with a Where Should I Start section and separated Research Opportunity Score from Program Risk Score.
+- Tightened the report dashboard further with a primary start-here lead, compact secondary targets, collapsed supporting evidence, and clearer Research Opportunity vs Program Risk language.
+- Reworked the Executive Summary into a decision dashboard that emphasizes opportunity level, attack surface, Nuclei outcome, and scan outcome before raw inventory.
+- Fixed report logo embedding for the shipped branding asset while retaining an oversized-asset safety cap.
+- Extended historical JavaScript reuse so Advanced Recon records secret-pattern evidence and the Secrets module merges those historical artifacts when live JavaScript is blocked.
+- Kept public package metadata in Beta status for honest release-candidate/public-testing positioning.
 - Improved asset-priority explainability with per-signal scoring details, strongest factors, confidence labels, historical/live distinctions, and clearer report presentation.
 - Fixed release-candidate validation issues around custom Nuclei template directories, UTF-8 BOM target lists/artifacts, Nuclei Not Run summary labels, and estimated request metrics.
 - Added `advanced` CLI command and integrated it into the full workflow before screenshots and Nuclei.
