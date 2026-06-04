@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import httpx
+
 from bladerecon.modules import probe
 
 
@@ -57,3 +59,36 @@ def test_technology_outputs_merge_duplicate_hosts(tmp_path: Path):
     react = next(item for item in rows[0]["technologies"] if item["name"] == "React")
     assert react["confidence"] == "High"
     assert "HTML Fingerprint" in react["sources"]
+
+
+def test_fingerprint_records_header_name_and_value_evidence() -> None:
+    response = httpx.Response(
+        200,
+        headers={
+            "Server": "Microsoft-IIS/10.0",
+            "X-AspNet-Version": "4.0.30319",
+            "CF-Ray": "abc",
+        },
+        request=httpx.Request("GET", "https://example.com"),
+    )
+
+    result = probe._fingerprint(response, "", "")
+    details = {item["name"]: item for item in result["technology_details"]}
+
+    assert "IIS" in result["technologies"]
+    assert details["IIS"]["confidence"] == "High"
+    assert "Server Header" in details["IIS"]["sources"]
+    assert "Framework Header Name" in details["ASP.NET"]["sources"]
+    assert "CDN Header Name" in details["Cloudflare"]["sources"]
+
+
+def test_fingerprint_does_not_treat_header_names_as_broad_value_matches() -> None:
+    response = httpx.Response(
+        200,
+        headers={"X-React-Debug": "disabled"},
+        request=httpx.Request("GET", "https://example.com"),
+    )
+
+    result = probe._fingerprint(response, "", "")
+
+    assert "React" not in result["technologies"]

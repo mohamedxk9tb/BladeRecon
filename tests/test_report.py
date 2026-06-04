@@ -139,15 +139,13 @@ def test_report_rendering_with_minimal_outputs(tmp_path: Path) -> None:
     assert "Candidate" in html
     assert "../screenshots/www.example.com.png" in html
     assert "screenshots\\www.example.com.png" not in html
-    assert "2026-05-31 10:00:00 UTC" in html
     assert "Estimated Requests Attempted" in html
     assert "HTTP Responses Recorded" in html
-    assert "CPU Core Utilization" in html
     assert "12.34s" in html
     assert "Performance Analytics" in html
     assert "Top Slowest Modules" in html
     assert "Top RAM Consumers" in html
-    assert "Peak RAM Usage" in html
+    assert "Module Performance" in html
     assert "88.5 MB" in html
     assert "Estimated Requests Attempted" in html
     assert "<td>Probe</td>" in html

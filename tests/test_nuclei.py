@@ -1,5 +1,10 @@
 import json
 
+import subprocess
+import sys
+
+import pytest
+
 from bladerecon.modules import nuclei
 
 
@@ -18,6 +23,16 @@ def test_nuclei_writes_json_array_and_jsonl(tmp_path):
     assert data[0]["template"] == "exposure"
     assert (tmp_path / "results.jsonl").read_text(encoding="utf-8") == jsonl
     assert "Total findings: 1" in (tmp_path / "results.md").read_text(encoding="utf-8")
+
+
+def test_nuclei_process_timeout_removes_temp_files(tmp_path):
+    cmd = [sys.executable, "-c", "import time; time.sleep(5)"]
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        nuclei._run_nuclei_process(cmd, timeout=1, out_dir=tmp_path, template_total=None, target_count=1, enforce_timeout=True, progress_interval=1)
+
+    assert not (tmp_path / "stdout.tmp").exists()
+    assert not (tmp_path / "stderr.tmp").exists()
 
 
 def test_nuclei_uses_empty_alive_file_as_empty_target_list(tmp_path):

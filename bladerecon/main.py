@@ -50,7 +50,6 @@ from .modules.utils import (
     print_module_header,
     print_module_summary,
     print_scan_summary,
-    progress_bar,
     readiness_failures,
     scan_state_path,
     skip,
@@ -325,18 +324,6 @@ def _module_duration_rows(domain: str, output: Path) -> List[Tuple[str, float, s
         if duration > 0:
             rows.append((str(name), duration, str(data.get("status") or "")))
     return rows
-
-
-def _print_scan_dashboard(current_module: str, completed_count: int, total_count: int, elapsed: float, eta: Optional[float]) -> None:
-    percent = (completed_count / total_count * 100) if total_count else 0
-    eta_text = f"~{format_duration(eta)}" if eta is not None and eta > 0 else "estimating"
-    lines = [
-        f"Current Module: {current_module}",
-        f"{progress_bar(completed_count, total_count)} {percent:5.1f}%",
-        f"Elapsed: {format_duration(elapsed)}",
-        f"ETA: {eta_text}",
-    ]
-    console.print(Panel("\n".join(lines), title="Scan Dashboard", border_style="cyan"))
 
 
 def _print_slowest_modules(domain: str, output: Path, limit: int = 4) -> None:
@@ -1088,11 +1075,7 @@ def full(
         module_monitor = PerformanceMonitor().start()
         try:
             print_module_header(module_titles.get(step_name, step_name.title()), domain)
-            average_duration = sum(module_durations) / len(module_durations) if module_durations else None
-            remaining_after_current = max(len(steps) - step_index, 0)
-            eta = average_duration * (remaining_after_current + 1) if average_duration is not None else None
-            _print_scan_dashboard(step_name, step_index - 1, len(steps), time.perf_counter() - scan_started, eta)
-            info(f"Starting {step_name}")
+            info(f"Starting {step_name} ({step_index}/{len(steps)})")
             result = step()
             step_duration = time.perf_counter() - step_started
             module_durations.append(step_duration)

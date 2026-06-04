@@ -31,7 +31,6 @@ from urllib.parse import quote, urlparse
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from .. import __version__
 from .utils import REPORT_VERSION, check_playwright_chromium, deduplicate_alive_urls, deduplicate_parameters, deduplicate_subdomains, dependency_health, info, nuclei_template_status, print_module_summary, setup_logging, success, target_output_dir, warn
@@ -739,7 +738,7 @@ def _normalized_technology_records(technology_results: List[dict], probe_results
                     host=host,
                 )
             for tech in row.get("detected", []):
-                _add_technology(records, str(tech), sources=["Technology Artifact"], host=host)
+                _add_technology(records, str(tech), confidence="Low", sources=["Technology Artifact"], host=host)
 
     for row in probe_results:
         if row.get("cdn"):
@@ -750,7 +749,7 @@ def _normalized_technology_records(technology_results: List[dict], probe_results
             _add_technology(records, str(row["server"]), "Web Server", "High", ["Server Header"], [str(row["server"])], _host_from_url(str(row.get("final_url") or row.get("url") or "")))
         detected = list(row.get("technologies", []) or [])
         for tech in detected:
-            _add_technology(records, str(tech), sources=["Probe Fingerprint"], host=_host_from_url(str(row.get("final_url") or row.get("url") or "")))
+            _add_technology(records, str(tech), confidence="Low", sources=["Probe Fingerprint"], host=_host_from_url(str(row.get("final_url") or row.get("url") or "")))
 
     normalized = []
     for item in records.values():
@@ -769,12 +768,21 @@ def _technology_distribution(technology_records: List[dict]) -> Dict[str, int]:
 
 
 def _technology_categories(technology_records: List[dict]) -> Dict[str, List[str]]:
-    order = ["Infrastructure", "CDN", "Web Server", "Framework", "CMS", "Hosting", "WAF", "Frontend", "API"]
+    order = ["Frontend", "Backend", "Infrastructure", "Cloud", "Security"]
     grouped: Dict[str, List[str]] = {category: [] for category in order}
+    role_map = {
+        "API": "Backend",
+        "CMS": "Backend",
+        "Framework": "Backend",
+        "Web Server": "Infrastructure",
+        "CDN": "Infrastructure",
+        "Hosting": "Cloud",
+        "WAF": "Security",
+    }
     for item in technology_records:
         roles = item.get("roles") or [item.get("category", "Infrastructure")]
         for role in roles:
-            grouped.setdefault(role, []).append(item["name"])
+            grouped.setdefault(role_map.get(role, role if role in grouped else "Infrastructure"), []).append(item["name"])
     return {category: sorted(set(values)) for category, values in grouped.items() if values}
 
 
@@ -805,7 +813,7 @@ def _attack_surface(probe_results: List[dict], subdomains: List[str], alive_host
         "technology_stack": technologies[:6],
         "waf_detected": wafs,
         "cdn_detected": cdns,
-        "servers": categories.get("Web Server", []),
+        "servers": [item["name"] for item in technology_records if "Web Server" in item.get("roles", [])],
     }
 
 
@@ -1255,18 +1263,13 @@ def run(target: str, output: Path = Path("results"), scan_duration: Optional[str
     out_md = reports_dir / "report.md"
     out_html = reports_dir / "report.html"
 
-    # Render
-    with Progress(SpinnerColumn("line"), TextColumn("{task.description}"), transient=True, refresh_per_second=4) as progress:
-        t = progress.add_task("Rendering report...", start=False)
-        progress.start_task(t)
-        try:
-            _render_markdown(context, out_md)
-            _render_html(context, out_html)
-            progress.update(t, description="done")
-        except Exception as exc:
-            log.exception("Failed to render report")
-            warn(f"Failed to render report: {exc}")
-            return
+    try:
+        _render_markdown(context, out_md)
+        _render_html(context, out_html)
+    except Exception as exc:
+        log.exception("Failed to render report")
+        warn(f"Failed to render report: {exc}")
+        return
 
     display_dir = _display_path(reports_dir)
     print_module_summary(

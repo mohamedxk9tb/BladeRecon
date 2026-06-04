@@ -197,6 +197,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "nuclei": {
         "automatic_scan": True,
+        "count_templates_before_run": False,
         "request_timeout": 8,
         "retries": 0,
         "module_timeout": 0,
@@ -245,6 +246,81 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
     return merged
 
 
+def _iter_config_paths(data: Dict[str, Any], prefix: Tuple[str, ...] = ()) -> Iterator[Tuple[Tuple[str, ...], Any]]:
+    for key, value in data.items():
+        path = (*prefix, str(key))
+        yield path, value
+        if isinstance(value, dict):
+            yield from _iter_config_paths(value, path)
+
+
+def _env_config_path(raw_key: str) -> Tuple[str, ...]:
+    key = raw_key.lower()
+    if "__" in key:
+        return tuple(part for part in key.split("__") if part)
+    known_paths = {
+        "_".join(path): path
+        for path, _value in _iter_config_paths(DEFAULT_CONFIG)
+    }
+    return known_paths.get(key, (key,))
+
+
+def _coerce_env_value(value: str, current: Any = None) -> Any:
+    raw = str(value).strip()
+    if isinstance(current, bool):
+        return raw.lower() in {"1", "true", "yes", "on"}
+    if isinstance(current, int) and not isinstance(current, bool):
+        try:
+            return int(raw)
+        except ValueError:
+            return current
+    if isinstance(current, float):
+        try:
+            return float(raw)
+        except ValueError:
+            return current
+    if isinstance(current, list):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return parsed
+        except Exception:
+            pass
+        return [item.strip() for item in raw.split(",") if item.strip()]
+    if isinstance(current, dict):
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else current
+        except Exception:
+            return current
+    if raw.lower() in {"true", "false"}:
+        return raw.lower() == "true"
+    try:
+        return json.loads(raw)
+    except Exception:
+        return value
+
+
+def _deep_get(data: Dict[str, Any], path: Tuple[str, ...], default: Any = None) -> Any:
+    current: Any = data
+    for part in path:
+        if not isinstance(current, dict) or part not in current:
+            return default
+        current = current[part]
+    return current
+
+
+def _deep_set(data: Dict[str, Any], path: Tuple[str, ...], value: Any) -> None:
+    current = data
+    for part in path[:-1]:
+        next_value = current.get(part)
+        if not isinstance(next_value, dict):
+            next_value = {}
+            current[part] = next_value
+        current = next_value
+    current[path[-1]] = value
+
+
 def load_config(path: Optional[Path] = None) -> dict:
     """Load project configuration and merge it with sane defaults."""
     cfg_path = path or Path("config.yaml")
@@ -258,7 +334,9 @@ def load_config(path: Optional[Path] = None) -> dict:
     merged = _deep_merge(DEFAULT_CONFIG, cfg)
     for key, value in os.environ.items():
         if key.startswith("BLADERECON_"):
-            merged[key[len("BLADERECON_"):].lower()] = value
+            config_path = _env_config_path(key[len("BLADERECON_"):])
+            current_value = _deep_get(merged, config_path)
+            _deep_set(merged, config_path, _coerce_env_value(value, current_value))
     return merged
 
 
@@ -556,25 +634,8 @@ def format_duration(seconds: float) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
-def estimate_remaining(elapsed: float, completed: int, total: Optional[int]) -> Optional[float]:
-    """Estimate remaining seconds from completed/total progress."""
-    if not total or total <= 0 or completed <= 0:
-        return None
-    remaining = max(0, total - completed)
-    return (elapsed / max(1, completed)) * remaining
-
-
-def progress_bar(completed: int, total: Optional[int], width: int = 24) -> str:
-    """Render an ASCII progress bar that works in PowerShell, CMD, and POSIX shells."""
-    if not total or total <= 0:
-        return "[" + ("-" * width) + "]"
-    ratio = min(1.0, max(0.0, completed / total))
-    filled = int(round(width * ratio))
-    return "[" + ("#" * filled) + ("-" * (width - filled)) + "]"
-
-
 class ProgressReporter:
-    """Low-noise elapsed/ETA printer for long-running CLI modules."""
+    """Low-noise elapsed/counter printer for long-running CLI modules."""
 
     def __init__(self, name: str, total: Optional[int] = None, interval: float = 10.0) -> None:
         self.name = name
@@ -593,17 +654,9 @@ class ProgressReporter:
             return
         self._last_emit = now
         elapsed = now - self.started
-        eta = estimate_remaining(elapsed, self.completed, self.total)
-        percent = ""
-        if self.total:
-            percent = f" {min(100, int((self.completed / self.total) * 100)):3d}%"
         progress_text = f"{self.completed}/{self.total}" if self.total else str(self.completed)
-        eta_text = format_duration(eta) if eta is not None else "estimating"
         suffix = f" | {detail}" if detail else ""
-        info(
-            f"Running: {self.name} {progress_bar(self.completed, self.total)}{percent} "
-            f"Progress: {progress_text} Elapsed: {format_duration(elapsed)} ETA: {eta_text}{suffix}"
-        )
+        info(f"{self.name}: {progress_text} elapsed={format_duration(elapsed)}{suffix}")
 
     def heartbeat(self, detail: str = "") -> None:
         self.update(self.completed, detail=detail)
@@ -1120,7 +1173,7 @@ def write_scan_metadata(domain: str, output: Path, **metadata: Any) -> None:
         except Exception:
             existing = {}
     existing.update({"updated_at": now_iso(), "report_version": REPORT_VERSION, **metadata})
-    meta_path.write_text(json.dumps(existing, indent=2, sort_keys=True), encoding="utf-8")
+    write_json(meta_path, existing)
 
 
 def _process_metrics() -> Dict[str, float]:
@@ -1233,16 +1286,38 @@ class PerformanceMonitor:
         }
 
 
-def write_json(path: Path, data: Any) -> None:
+def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
+    """Write text to *path* via a same-directory temporary file and atomic replace."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    tmp_path: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding=encoding,
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            tmp_path = Path(handle.name)
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path and tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+
+
+def write_json(path: Path, data: Any) -> None:
+    atomic_write_text(path, json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def write_jsonl(path: Path, rows: Iterable[dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as fh:
-        for row in rows:
-            fh.write(json.dumps(row, sort_keys=True) + "\n")
+    atomic_write_text(path, "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -1287,7 +1362,7 @@ def save_scan_state(domain: str, output: Path, state: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     _ensure_scan_state_metadata(domain, state)
     state["updated_at"] = now_iso()
-    path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+    write_json(path, state)
 
 
 def update_scan_state(domain: str, output: Path, module: str, status_value: str, duration: float, error_text: str = "", performance: Optional[Dict[str, Any]] = None) -> None:
@@ -1354,7 +1429,7 @@ def save_cache(output: Path, source: str, domain: str, data: Any) -> None:
     path = cache_path(output, source, domain)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"source": source, "domain": domain, "created_at": now_iso(), "created_epoch": time.time(), "data": data}
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    write_json(path, payload)
 
 
 def cache_info(output: Path) -> dict:

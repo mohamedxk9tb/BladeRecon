@@ -19,8 +19,6 @@ from urllib.parse import urlparse
 
 import httpx
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn
-
 console = Console()
 
 from .utils import (
@@ -118,8 +116,8 @@ def _result_dict(**kwargs: object) -> Dict[str, object]:
     return {k: defaults[k] for k in PROBE_FIELDS}
 
 
-def _add_if(headers: Dict[str, str], haystack: str, tech: List[str], name: str, needles: List[str]) -> None:
-    if any(needle in haystack or needle in headers for needle in needles):
+def _add_if(haystack: str, tech: List[str], name: str, needles: List[str]) -> None:
+    if any(needle in haystack for needle in needles):
         tech.append(name)
 
 
@@ -193,27 +191,27 @@ def _fingerprint(resp: httpx.Response, title: str, body_text: str = "") -> Dict[
         body,
     ]).lower()
 
-    _add_if(headers, joined, tech, "Nginx", ["nginx"])
-    _add_if(headers, joined, tech, "Apache", ["apache"])
-    _add_if(headers, joined, tech, "IIS", ["microsoft-iis", "iis"])
-    _add_if(headers, joined, tech, "LiteSpeed", ["litespeed", "x-litespeed"])
-    _add_if(headers, joined, tech, "ASP.NET Core", ["asp.net core", "aspnetcore", ".aspnetcore"])
-    _add_if(headers, joined, tech, "ASP.NET", ["asp.net", "x-aspnet-version", "x-aspnetmvc-version"])
-    _add_if(headers, joined, tech, "PHP", ["php"])
-    _add_if(headers, joined, tech, "Laravel", ["laravel_session", "laravel"])
-    _add_if(headers, joined, tech, "Django", ["csrftoken", "django"])
-    _add_if(headers, joined, tech, "Flask", ["flask"])
-    _add_if(headers, joined, tech, "Express.js", ["express"])
-    _add_if(headers, joined, tech, "WordPress", ["wp-content", "wp-includes", "wordpress"])
-    _add_if(headers, joined, tech, "Drupal", ["drupal", "x-drupal-cache"])
-    _add_if(headers, joined, tech, "Joomla", ["joomla"])
-    _add_if(headers, joined, tech, "React", ["react", "data-reactroot", "__react"])
-    _add_if(headers, joined, tech, "Next.js", ["next.js", "__next", "next-route-announcer"])
-    _add_if(headers, joined, tech, "Angular", ["ng-version", "angular"])
-    _add_if(headers, joined, tech, "Vue", ["vue", "__vue__", "data-v-"])
-    _add_if(headers, joined, tech, "Cloudflare", ["cloudflare", "cf-ray"])
-    _add_if(headers, joined, tech, "Akamai", ["akamai", "akamai-ghost", "x-akamai"])
-    _add_if(headers, joined, tech, "Fastly", ["fastly", "x-served-by"])
+    _add_if(joined, tech, "Nginx", ["nginx"])
+    _add_if(joined, tech, "Apache", ["apache"])
+    _add_if(joined, tech, "IIS", ["microsoft-iis"])
+    _add_if(joined, tech, "LiteSpeed", ["litespeed"])
+    _add_if(joined, tech, "ASP.NET Core", ["asp.net core", "aspnetcore", ".aspnetcore"])
+    _add_if(joined, tech, "ASP.NET", ["asp.net"])
+    _add_if(joined, tech, "PHP", ["php"])
+    _add_if(joined, tech, "Laravel", ["laravel_session", "laravel"])
+    _add_if(joined, tech, "Django", ["csrftoken", "django"])
+    _add_if(joined, tech, "Flask", ["flask"])
+    _add_if(joined, tech, "Express.js", ["express"])
+    _add_if(joined, tech, "WordPress", ["wp-content", "wp-includes", "wordpress"])
+    _add_if(joined, tech, "Drupal", ["drupal"])
+    _add_if(joined, tech, "Joomla", ["joomla"])
+    _add_if(joined, tech, "React", ["react", "data-reactroot", "__react"])
+    _add_if(joined, tech, "Next.js", ["next.js", "__next", "next-route-announcer"])
+    _add_if(joined, tech, "Angular", ["ng-version", "angular"])
+    _add_if(joined, tech, "Vue", ["vue", "__vue__", "data-v-"])
+    _add_if(joined, tech, "Cloudflare", ["cloudflare"])
+    _add_if(joined, tech, "Akamai", ["akamai", "akamai-ghost"])
+    _add_if(joined, tech, "Fastly", ["fastly"])
 
     header_checks = [
         ("Nginx", server, "Server Header", "nginx"),
@@ -230,6 +228,21 @@ def _fingerprint(resp: httpx.Response, title: str, body_text: str = "") -> Dict[
     for name, value, source, needle in header_checks:
         if needle in str(value or "").lower():
             _add_technology_detail(details, name, "High", source, f"{source}: {str(value)[:80]}")
+    header_name_checks = [
+        ("ASP.NET", "Framework Header Name", "x-aspnet-version"),
+        ("ASP.NET", "Framework Header Name", "x-aspnetmvc-version"),
+        ("Drupal", "Framework Header Name", "x-drupal-cache"),
+        ("Cloudflare", "CDN Header Name", "cf-ray"),
+        ("Cloudflare WAF", "WAF Header Name", "cf-ray"),
+        ("CloudFront", "CDN Header Name", "x-amz-cf-id"),
+        ("Fastly", "CDN Header Name", "x-served-by"),
+        ("LiteSpeed", "Server Header Name", "x-litespeed-cache"),
+        ("Sucuri", "WAF Header Name", "x-sucuri-id"),
+        ("Imperva", "WAF Header Name", "x-iinfo"),
+    ]
+    for name, source, header_name in header_name_checks:
+        if header_name in headers:
+            _add_technology_detail(details, name, "High", source, header_name)
     if generator:
         for name in ("WordPress", "Drupal", "Joomla"):
             if name.lower() in generator:
@@ -281,7 +294,7 @@ def _fingerprint(resp: httpx.Response, title: str, body_text: str = "") -> Dict[
         _add_technology_detail(details, "Imperva", "High", "WAF Header", "x-iinfo")
 
     for item in tech:
-        _add_technology_detail(details, item, "Medium", "Probe Fingerprint", item)
+        _add_technology_detail(details, item, "Low", "Probe Fingerprint", item)
     return {"server": server, "cdn": cdn, "waf": waf, "technologies": sorted(set(tech)), "technology_details": _technology_detail_list(details)}
 
 
@@ -331,7 +344,7 @@ def _write_technology_outputs(target_dir: Path, results: List[Dict[str, object]]
                 "; ".join(str(item) for item in evidence if item),
             )
         for item in row.get("technologies", []) or []:
-            _merge_detected_technology(record, str(item), "Medium", "Probe Fingerprint", str(item))
+            _merge_detected_technology(record, str(item), "Low", "Probe Fingerprint", str(item))
         if row.get("cdn"):
             _merge_detected_technology(record, str(row["cdn"]), "High", "CDN Header", str(row["cdn"]))
         if row.get("waf"):
@@ -499,7 +512,7 @@ async def _run_probes(
     retries = get_retries("http", 1)
     browser_fallback_enabled = bool(config_get(config, "probe.browser_fallback_enabled", True))
     max_browser_fallbacks = max(0, int(config_get(config, "probe.max_browser_fallbacks", 10)))
-    reporter = ProgressReporter("Probe", total=len(urls), interval=10)
+    reporter = ProgressReporter("Probe", total=len(urls), interval=15)
     reporter.update(0, detail=f"profile={active_profile} concurrency={concurrency} per_host={per_host_limit} rps={limiter.rate_per_second:g} timeout={timeout}s", force=True)
     completed = 0
 
@@ -509,35 +522,20 @@ async def _run_probes(
         verify=False,
         **httpx_client_kwargs(config, proxy, user_agent, random_user_agent),
     ) as client:
-        with Progress(
-            SpinnerColumn("line"),
-            TextColumn("{task.description}"),
-            BarColumn(),
-            TimeRemainingColumn(),
-            transient=True,
-            refresh_per_second=4,
-        ) as progress:
-            task_id = progress.add_task("Probing hosts", total=len(urls))
+        async def _worker(url: str) -> None:
+            nonlocal completed
+            async with sem:
+                host_sem = host_sems.setdefault(host_key(url), asyncio.Semaphore(per_host_limit))
+                async with host_sem:
+                    r = await _probe_url(client, url, timeout, retries, limiter)
+                results.append(r)
+                if r["alive"]:
+                    alive_hosts.append(r["final_url"])
+                completed += 1
+                reporter.update(completed, detail=f"alive={len(alive_hosts)}")
 
-            async def _worker(url: str) -> None:
-                nonlocal completed
-                async with sem:
-                    host_sem = host_sems.setdefault(host_key(url), asyncio.Semaphore(per_host_limit))
-                    async with host_sem:
-                        r = await _probe_url(client, url, timeout, retries, limiter)
-                    results.append(r)
-                    if r["alive"]:
-                        alive_hosts.append(r["final_url"])
-                        progress.update(task_id, advance=1,
-                                        description=f"[green]OK[/] {url} [{r['status_code']}]")
-                    else:
-                        progress.update(task_id, advance=1,
-                                        description=f"[red]DEAD[/] {url}")
-                    completed += 1
-                    reporter.update(completed, detail=f"alive={len(alive_hosts)}")
-
-            tasks = [asyncio.create_task(_worker(u)) for u in urls]
-            await asyncio.gather(*tasks, return_exceptions=True)
+        tasks = [asyncio.create_task(_worker(u)) for u in urls]
+        await asyncio.gather(*tasks, return_exceptions=True)
     reporter.update(completed, detail=f"alive={len(alive_hosts)}", force=True)
 
     fallback_urls = [

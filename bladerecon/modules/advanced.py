@@ -8,6 +8,7 @@ so it improves coverage without becoming a generic brute-force scanner.
 from __future__ import annotations
 
 import asyncio
+import email.utils
 import json
 import re
 import time
@@ -74,6 +75,8 @@ SECURITY_HEADER_NAMES = {
 
 HOST_RE = re.compile(r"(?:(?:https?|wss?)://)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?", re.IGNORECASE)
 JS_RE = re.compile(r"(?:https?://[^\s\"'<>]+?\.js(?:\?[^\s\"'<>]*)?|/[A-Za-z0-9._~:/@!$&()*+,;=%-]+?\.js(?:\?[^\s\"'<>]*)?)", re.IGNORECASE)
+TRANSIENT_SOURCE_STATUSES = {429, 500, 502, 503, 504}
+SOURCE_COOLDOWNS: Dict[str, float] = {}
 
 
 def _read_json(path: Path, default: Any) -> Any:
@@ -91,9 +94,49 @@ def _read_lines(path: Path) -> List[str]:
     return [line.strip() for line in path.read_text(encoding="utf-8-sig").splitlines() if line.strip()]
 
 
+def _retry_after_seconds(value: str, default: float = 2.0) -> float:
+    raw = str(value or "").strip()
+    if not raw:
+        return default
+    try:
+        return max(0.0, min(30.0, float(raw)))
+    except ValueError:
+        try:
+            parsed = email.utils.parsedate_to_datetime(raw)
+            return max(0.0, min(30.0, parsed.timestamp() - time.time()))
+        except Exception:
+            return default
+
+
+async def _source_get(client: httpx.AsyncClient, source: str, url: str) -> httpx.Response:
+    now = time.monotonic()
+    cooldown_until = SOURCE_COOLDOWNS.get(source, 0.0)
+    if cooldown_until > now:
+        await asyncio.sleep(cooldown_until - now)
+    delay = 1.0
+    last_resp: Optional[httpx.Response] = None
+    for attempt in range(3):
+        resp = await client.get(url)
+        if resp.status_code not in TRANSIENT_SOURCE_STATUSES:
+            return resp
+        last_resp = resp
+        wait = _retry_after_seconds(resp.headers.get("retry-after", ""), delay)
+        SOURCE_COOLDOWNS[source] = time.monotonic() + wait
+        if attempt < 2:
+            warn(f"{source} temporary status {resp.status_code}; backing off {wait:.1f}s")
+            await asyncio.sleep(wait)
+            delay *= 2.0
+            continue
+        return resp
+    return last_resp  # type: ignore[return-value]
+
+
 def _target_host(target: str) -> str:
-    parsed = urlparse(target if "://" in target else f"https://{target}")
-    return (parsed.hostname or target).lower().rstrip(".")
+    try:
+        parsed = urlparse(target if "://" in target else f"https://{target}")
+        return (parsed.hostname or target).lower().rstrip(".")
+    except ValueError:
+        return target.lower().rstrip(".")
 
 
 def _in_scope_host(host: str, root: str) -> bool:
@@ -105,14 +148,18 @@ def _normalize_historical_url(value: str, root: str) -> str:
     raw = str(value or "").strip().strip("\"'")
     if not raw:
         return ""
-    parsed = urlparse(raw if "://" in raw else f"https://{raw.lstrip('/')}")
+    try:
+        parsed = urlparse(raw if "://" in raw else f"https://{raw.lstrip('/')}")
+        host = (parsed.hostname or "").lower().rstrip(".")
+        netloc = parsed.netloc.lower()
+    except ValueError:
+        return ""
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return ""
-    host = (parsed.hostname or "").lower().rstrip(".")
     if not _in_scope_host(host, root):
         return ""
     path = re.sub(r"/{2,}", "/", parsed.path or "/")
-    return urlunparse((parsed.scheme.lower(), parsed.netloc.lower(), path, "", parsed.query, ""))
+    return urlunparse((parsed.scheme.lower(), netloc, path, "", parsed.query, ""))
 
 
 def _path_key(value: str) -> str:
@@ -166,7 +213,7 @@ async def _fetch_wayback(domain: str, config: dict, limiter: AsyncRateLimiter) -
     try:
         await limiter.wait()
         async with httpx.AsyncClient(timeout=float(config_get(config, "timeouts.source", 30)), follow_redirects=True, **httpx_client_kwargs(config)) as client:
-            resp = await async_retry(client.get, url, max_retries=1, delay=1.0, backoff=2.0)
+            resp = await _source_get(client, "Wayback", url)
             resp.raise_for_status()
             data = resp.json()
     except Exception as exc:
@@ -188,7 +235,7 @@ async def _fetch_commoncrawl(domain: str, config: dict, limiter: AsyncRateLimite
         await limiter.wait()
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, **httpx_client_kwargs(config)) as client:
             requests += 1
-            index_resp = await async_retry(client.get, "https://index.commoncrawl.org/collinfo.json", max_retries=1, delay=1.0, backoff=2.0)
+            index_resp = await _source_get(client, "Common Crawl", "https://index.commoncrawl.org/collinfo.json")
             index_resp.raise_for_status()
             indexes = index_resp.json()
             cdx_api = ""
@@ -202,7 +249,7 @@ async def _fetch_commoncrawl(domain: str, config: dict, limiter: AsyncRateLimite
             await limiter.wait()
             requests += 1
             query = f"{cdx_api}?url=*.{domain}/*&output=json&fl=url&filter=status:200&collapse=urlkey&limit=5000"
-            resp = await async_retry(client.get, query, max_retries=1, delay=1.0, backoff=2.0)
+            resp = await _source_get(client, "Common Crawl", query)
             resp.raise_for_status()
     except Exception as exc:
         warn(f"Common Crawl historical URLs unavailable: {exc}")
@@ -230,7 +277,7 @@ async def _fetch_otx_urls(domain: str, config: dict, limiter: AsyncRateLimiter) 
             headers["X-OTX-API-KEY"] = str(api_key)
         await limiter.wait()
         async with httpx.AsyncClient(timeout=float(config_get(config, "timeouts.source", 30)), headers=headers, **kwargs) as client:
-            resp = await async_retry(client.get, url, max_retries=1, delay=1.0, backoff=2.0)
+            resp = await _source_get(client, "AlienVault", url)
             resp.raise_for_status()
             data = resp.json()
     except Exception as exc:

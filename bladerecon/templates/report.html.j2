@@ -263,10 +263,10 @@
           <a href="#technology"><span class="nav-icon">T</span> Technology</a>
           <a href="#intelligence"><span class="nav-icon">R</span> Intelligence</a>
           <a href="#advanced-recon"><span class="nav-icon">+</span> Advanced</a>
-          <a href="#performance"><span class="nav-icon">%</span> Performance</a>
           <a href="#secrets"><span class="nav-icon">&#9671;</span> Secrets</a>
           <a href="#screenshots"><span class="nav-icon">&#9638;</span> Screenshots</a>
           <a href="#findings"><span class="nav-icon">!</span> Findings</a>
+          <a href="#performance"><span class="nav-icon">%</span> Performance</a>
         </nav>
       </aside>
 
@@ -344,62 +344,6 @@
             <li>{% if nuclei_skipped_reason %}Nuclei: <strong>{{ nuclei_status_label }}</strong> ({{ nuclei_skipped_reason }}).{% elif nuclei_available %}<strong>{{ nuclei_count }}</strong> Nuclei findings available.{% else %}No Nuclei findings available.{% endif %}</li>
             {% if advanced_metadata %}<li><strong>{{ historical_urls | length }}</strong> historical URLs, <strong>{{ content_discovery | length }}</strong> interesting paths, and <strong>{{ asset_priority.get("asset_count", 0) }}</strong> priority assets added by advanced recon.</li>{% endif %}
           </ul>
-        </section>
-
-        <section class="section" id="performance">
-          <details class="data-panel">
-            <summary><span class="summary-title"><strong>Performance Analytics</strong><small>Scan timing, resource usage, and module-level runtime metrics.</small></span><span class="summary-count">{{ performance.total_duration }}</span></summary>
-            <div class="panel-body">
-              <div class="intel-grid">
-                <div class="intel-item" title="{{ performance.scan_start_time_raw }}"><span class="intel-value time-value">{{ performance.scan_start_time }}</span><span class="intel-label">Scan Start Time</span></div>
-                <div class="intel-item" title="{{ performance.scan_end_time_raw }}"><span class="intel-value time-value">{{ performance.scan_end_time }}</span><span class="intel-label">Scan End Time</span></div>
-                <div class="intel-item"><span class="intel-value">{{ performance.total_duration }}</span><span class="intel-label">Total Duration</span></div>
-                <div class="intel-item"><span class="intel-value">{{ performance.peak_ram_mb }} MB</span><span class="intel-label">Peak RAM Usage</span></div>
-                <div class="intel-item"><span class="intel-value">{{ performance.average_ram_mb }} MB</span><span class="intel-label">Average RAM Usage</span></div>
-                <div class="intel-item" title="{{ performance.cpu_note }}"><span class="intel-value">{{ performance.peak_cpu_percent }}%</span><span class="intel-label">Peak CPU Core Utilization</span><span class="intel-note">Process sample; may exceed 100% on multi-core work.</span></div>
-                <div class="intel-item" title="{{ performance.cpu_note }}"><span class="intel-value">{{ performance.average_cpu_percent }}%</span><span class="intel-label">Average CPU Core Utilization</span><span class="intel-note">Process sample across the scan window.</span></div>
-                <div class="intel-item" title="{{ performance.traffic_note }}"><span class="intel-value">{{ performance.total_requests_sent }}</span><span class="intel-label">Estimated Requests Attempted</span><span class="intel-note">Derived from module metadata.</span></div>
-                <div class="intel-item" title="{{ performance.traffic_note }}"><span class="intel-value">{{ performance.total_responses_received }}</span><span class="intel-label">HTTP Responses Recorded</span><span class="intel-note">Probe rows with status codes.</span></div>
-                <div class="intel-item"><span class="intel-value">{{ performance.module_count }}</span><span class="intel-label">Module Count</span></div>
-              </div>
-              <p class="muted">{{ performance.traffic_note }}</p>
-              {% if performance.top_slowest_modules or performance.top_ram_consumers %}
-              <div class="ranking-grid">
-                <div class="ranking-card">
-                  <span class="label">Top Slowest Modules</span>
-                  <ol class="ranking-list">
-                    {% for row in performance.top_slowest_modules %}
-                    <li><span><span class="rank-index">{{ loop.index }}.</span> {{ row.module }}</span><strong>{{ row.duration_seconds }}s</strong></li>
-                    {% else %}
-                    <li>No completed module timing recorded</li>
-                    {% endfor %}
-                  </ol>
-                </div>
-                <div class="ranking-card">
-                  <span class="label">Top RAM Consumers</span>
-                  <ol class="ranking-list">
-                    {% for row in performance.top_ram_consumers %}
-                    <li><span><span class="rank-index">{{ loop.index }}.</span> {{ row.module }}</span><strong>{{ row.peak_ram_mb }} MB</strong></li>
-                    {% else %}
-                    <li>No module memory data recorded</li>
-                    {% endfor %}
-                  </ol>
-                </div>
-              </div>
-              {% endif %}
-              <div class="section-head" style="margin-top: 18px;"><h3>Module Performance</h3><small>Peak and average RAM are process-level samples during each module.</small></div>
-              <div class="table-wrap">
-                <table>
-                  <thead><tr><th>Module</th><th>Status</th><th>Duration</th><th>Peak RAM</th><th>Average RAM</th></tr></thead>
-                  <tbody>
-                    {% for row in performance.modules %}
-                    <tr><td>{{ row.module }}</td><td>{{ row.status }}</td><td>{{ row.duration_seconds }}s</td><td>{{ row.peak_ram_mb }} MB</td><td>{{ row.average_ram_mb }} MB</td></tr>
-                    {% endfor %}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </details>
         </section>
 
         <section class="section card intel-card">
@@ -697,6 +641,56 @@
           <details class="data-panel" id="findings">
             <summary><span class="summary-title"><strong>Nuclei Findings</strong><small>{% if nuclei_skipped_reason %}{{ nuclei_status_label }}: {{ nuclei_skipped_reason }}{% else %}Preview first 20 findings. Expand for full list.{% endif %}</small></span><span class="summary-count">{{ nuclei_status }}</span></summary>
             <div class="panel-body" data-panel="findings"></div>
+          </details>
+        </section>
+
+        <section class="section" id="performance">
+          <details class="data-panel">
+            <summary><span class="summary-title"><strong>Performance Analytics</strong><small>Scan timing, requests, and slowest modules.</small></span><span class="summary-count">{{ performance.total_duration }}</span></summary>
+            <div class="panel-body">
+              <div class="intel-grid">
+                <div class="intel-item"><span class="intel-value">{{ performance.total_duration }}</span><span class="intel-label">Total Duration</span></div>
+                <div class="intel-item" title="{{ performance.traffic_note }}"><span class="intel-value">{{ performance.total_requests_sent }}</span><span class="intel-label">Estimated Requests Attempted</span></div>
+                <div class="intel-item" title="{{ performance.traffic_note }}"><span class="intel-value">{{ performance.total_responses_received }}</span><span class="intel-label">HTTP Responses Recorded</span></div>
+                <div class="intel-item"><span class="intel-value">{{ performance.module_count }}</span><span class="intel-label">Module Count</span></div>
+              </div>
+              <p class="muted">{{ performance.traffic_note }}</p>
+              {% if performance.top_slowest_modules or performance.top_ram_consumers %}
+              <div class="ranking-grid">
+                <div class="ranking-card">
+                  <span class="label">Top Slowest Modules</span>
+                  <ol class="ranking-list">
+                    {% for row in performance.top_slowest_modules %}
+                    <li><span><span class="rank-index">{{ loop.index }}.</span> {{ row.module }}</span><strong>{{ row.duration_seconds }}s</strong></li>
+                    {% else %}
+                    <li>No completed module timing recorded</li>
+                    {% endfor %}
+                  </ol>
+                </div>
+                <div class="ranking-card">
+                  <span class="label">Top RAM Consumers</span>
+                  <ol class="ranking-list">
+                    {% for row in performance.top_ram_consumers %}
+                    <li><span><span class="rank-index">{{ loop.index }}.</span> {{ row.module }}</span><strong>{{ row.peak_ram_mb }} MB</strong></li>
+                    {% else %}
+                    <li>No module memory data recorded</li>
+                    {% endfor %}
+                  </ol>
+                </div>
+              </div>
+              {% endif %}
+              <div class="section-head" style="margin-top: 18px;"><h3>Module Performance</h3><small>Detailed timing and memory samples</small></div>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>Module</th><th>Status</th><th>Duration</th><th>Peak RAM</th><th>Average RAM</th></tr></thead>
+                  <tbody>
+                    {% for row in performance.modules %}
+                    <tr><td>{{ row.module }}</td><td>{{ row.status }}</td><td>{{ row.duration_seconds }}s</td><td>{{ row.peak_ram_mb }} MB</td><td>{{ row.average_ram_mb }} MB</td></tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </details>
         </section>
 

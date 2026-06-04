@@ -36,6 +36,31 @@ def test_detect_technologies_from_probe_and_js():
     assert "data-reactroot" in react["evidence"]
 
 
+def test_weak_framework_text_stays_informational_for_template_selection():
+    technologies = [
+        {"name": "Laravel", "confidence": "Medium", "hosts": ["api.example.com"], "sources": ["Probe Fingerprint"], "evidence": ["Laravel"]},
+        {"name": "PHP", "confidence": "High", "hosts": ["api.example.com"], "sources": ["Framework Header"], "evidence": ["PHP/8.2"]},
+    ]
+
+    result = intelligence.recommend_templates(technologies, [])
+
+    assert "php" in result["selected_tags"]
+    assert "laravel" not in result["selected_tags"]
+
+
+def test_javascript_urls_do_not_create_java_detection():
+    scan_data = {
+        "technology_rows": [],
+        "probe_rows": [],
+        "js_rows": [{"url": "https://example.com/static/javascript/app.js"}],
+        "endpoint_rows": [],
+    }
+
+    names = {item["name"] for item in intelligence.detect_technologies(scan_data)}
+
+    assert "Java" not in names
+
+
 def test_cloud_assets_and_risk_score():
     scan_data = {
         "endpoint_rows": [{"endpoint": "https://admin.example.com/login"}],
@@ -77,7 +102,8 @@ def test_intelligence_run_writes_expected_outputs(tmp_path: Path, monkeypatch):
     assert (target / "technology" / "technology.json").exists()
     assert (target / "intelligence" / "risk_score.json").exists()
     template_data = json.loads((target / "intelligence" / "template_intelligence.json").read_text(encoding="utf-8"))
-    assert "php" in template_data["selected_tags"]
+    assert "apache" in template_data["selected_tags"]
+    assert "php" not in template_data["selected_tags"]
 
 
 def test_intelligence_skips_without_valid_scan_artifacts(tmp_path: Path, monkeypatch):

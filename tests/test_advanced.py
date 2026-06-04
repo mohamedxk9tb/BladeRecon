@@ -9,6 +9,10 @@ def test_historical_url_normalization_keeps_in_scope_urls() -> None:
     assert advanced._normalize_historical_url("https://evil.test/api", "example.com") == ""
 
 
+def test_historical_url_normalization_skips_malformed_ipv6_url() -> None:
+    assert advanced._normalize_historical_url("https://[2001:db8::1/api", "example.com") == ""
+
+
 def test_historical_correlation_detects_removed_legacy_endpoint(tmp_path: Path) -> None:
     target = tmp_path / "example.com"
     (target / "endpoints").mkdir(parents=True)

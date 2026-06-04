@@ -10,6 +10,7 @@ This module exposes a `run` function that the CLI can call.
 from __future__ import annotations
 
 import asyncio
+import email.utils
 import re
 import secrets
 import socket
@@ -22,7 +23,6 @@ import httpx
 from rich.console import Console
 
 from .utils import (
-    async_retry,
     config_get,
     deduplicate_prefixes,
     deduplicate_subdomains,
@@ -43,6 +43,9 @@ from .utils import (
 )
 
 console = Console()
+
+TRANSIENT_SOURCE_STATUSES = {429, 500, 502, 503, 504}
+SOURCE_COOLDOWNS: Dict[str, float] = {}
 
 
 def _is_in_scope(host: str, domain: str) -> bool:
@@ -83,6 +86,42 @@ def _log_source_result(source: str, candidates: List[str], tagged: List[Dict[str
         log.info("%s returned %d candidates and %d unique tagged subdomains%s", source, len(candidates), len(tagged), suffix)
 
 
+def _retry_after_seconds(value: str, default: float = 2.0) -> float:
+    raw = str(value or "").strip()
+    if not raw:
+        return default
+    try:
+        return max(0.0, min(30.0, float(raw)))
+    except ValueError:
+        try:
+            parsed = email.utils.parsedate_to_datetime(raw)
+            return max(0.0, min(30.0, parsed.timestamp() - time.time()))
+        except Exception:
+            return default
+
+
+async def _source_get(client: httpx.AsyncClient, source: str, url: str, **kwargs: Any) -> httpx.Response:
+    now = time.monotonic()
+    cooldown_until = SOURCE_COOLDOWNS.get(source, 0.0)
+    if cooldown_until > now:
+        await asyncio.sleep(cooldown_until - now)
+    delay = 1.0
+    last_resp: Optional[httpx.Response] = None
+    for attempt in range(3):
+        resp = await client.get(url, **kwargs)
+        if resp.status_code not in TRANSIENT_SOURCE_STATUSES:
+            return resp
+        last_resp = resp
+        wait = _retry_after_seconds(resp.headers.get("retry-after", ""), delay)
+        SOURCE_COOLDOWNS[source] = time.monotonic() + wait
+        if attempt < 2:
+            await asyncio.sleep(wait)
+            delay *= 2.0
+            continue
+        return resp
+    return last_resp  # type: ignore[return-value]
+
+
 async def _fetch_crtsh(domain: str, config: dict, output: Path, proxy: Optional[str] = None, user_agent: Optional[str] = None, random_user_agent: bool = False) -> Optional[List[Dict[str, str]]]:
     cached = load_cache(output, "crtsh", domain)
     if cached is not None:
@@ -99,7 +138,7 @@ async def _fetch_crtsh(domain: str, config: dict, output: Path, proxy: Optional[
             last_error: Optional[Exception] = None
             for url in urls:
                 try:
-                    resp = await async_retry(client.get, url, max_retries=2, delay=1.0, backoff=2.0)
+                    resp = await _source_get(client, "crt.sh", url)
                     resp.raise_for_status()
                     data = resp.json()
                     last_error = None
@@ -140,7 +179,7 @@ async def _fetch_alienvault(domain: str, config: dict, output: Path, api_key: Op
         kwargs = httpx_client_kwargs(config, proxy, user_agent, random_user_agent)
         headers = {**kwargs.pop("headers", {}), **headers}
         async with httpx.AsyncClient(timeout=float(config_get(config, "timeouts.source", 30)), headers=headers, **kwargs) as client:
-            resp = await async_retry(client.get, url, headers=headers, max_retries=2, delay=1.0, backoff=2.0)
+            resp = await _source_get(client, "AlienVault", url, headers=headers)
             resp.raise_for_status()
             data = resp.json()
     except Exception as exc:
@@ -179,7 +218,7 @@ async def _fetch_chaos(domain: str, config: dict, output: Path, proxy: Optional[
         kwargs = httpx_client_kwargs(config, proxy, user_agent, random_user_agent)
         headers = {**kwargs.pop("headers", {}), "Authorization": str(api_key)}
         async with httpx.AsyncClient(timeout=float(config_get(config, "timeouts.source", 30)), headers=headers, **kwargs) as client:
-            resp = await async_retry(client.get, url, max_retries=2, delay=1.0, backoff=2.0)
+            resp = await _source_get(client, "Chaos", url)
             resp.raise_for_status()
             data = resp.json()
     except Exception as exc:
@@ -201,7 +240,7 @@ async def _fetch_bufferover(domain: str, config: dict, output: Path, proxy: Opti
     url = f"https://dns.bufferover.run/dns?q=.{domain}"
     try:
         async with httpx.AsyncClient(timeout=float(config_get(config, "timeouts.source", 30)), follow_redirects=True, **httpx_client_kwargs(config, proxy, user_agent, random_user_agent)) as client:
-            resp = await async_retry(client.get, url, max_retries=2, delay=1.0, backoff=2.0)
+            resp = await _source_get(client, "BufferOver", url)
             resp.raise_for_status()
             data = resp.json()
     except Exception:
@@ -226,7 +265,7 @@ async def _fetch_urlscan(domain: str, config: dict, output: Path, proxy: Optiona
     url = f"https://urlscan.io/api/v1/search/?q=domain:{domain}&size=100"
     try:
         async with httpx.AsyncClient(timeout=float(config_get(config, "timeouts.source", 30)), follow_redirects=True, **httpx_client_kwargs(config, proxy, user_agent, random_user_agent)) as client:
-            resp = await async_retry(client.get, url, max_retries=2, delay=1.0, backoff=2.0)
+            resp = await _source_get(client, "URLScan", url)
             resp.raise_for_status()
             data = resp.json()
     except Exception as exc:
@@ -252,7 +291,7 @@ async def _fetch_plain_text_source(source: str, url: str, domain: str, config: d
         return rows
     try:
         async with httpx.AsyncClient(timeout=float(config_get(config, "timeouts.source", 30)), **httpx_client_kwargs(config, proxy, user_agent, random_user_agent)) as client:
-            resp = await async_retry(client.get, url, max_retries=2, delay=1.0, backoff=2.0)
+            resp = await _source_get(client, source, url)
             resp.raise_for_status()
     except Exception as exc:
         warn(f"{source} request failed: {exc}")

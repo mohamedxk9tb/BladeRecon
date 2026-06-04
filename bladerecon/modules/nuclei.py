@@ -19,12 +19,10 @@ from urllib.parse import urlparse
 
 from rich.console import Console
 from rich.markup import escape
-from rich.progress import Progress, SpinnerColumn, TextColumn
-
 console = Console()
 
 from .intelligence import TEMPLATE_TAGS
-from .utils import ModuleResult, ProgressReporter, config_get, deduplicate_alive_urls, format_duration, get_profiled_ceiling, get_profiled_concurrency, get_profiled_rate_limit, get_timeout, info, load_config, log_duration, normalize_scan_profile, normalize_target, nuclei_template_status, prepare_module_output, print_module_summary, setup_logging, skipped_result, skip, success, suppress_third_party_banner, target_output_dir, warn, write_json
+from .utils import ModuleResult, atomic_write_text, config_get, deduplicate_alive_urls, format_duration, get_profiled_ceiling, get_profiled_concurrency, get_profiled_rate_limit, get_timeout, info, load_config, log_duration, normalize_scan_profile, normalize_target, nuclei_template_status, prepare_module_output, print_module_summary, setup_logging, skipped_result, skip, success, suppress_third_party_banner, target_output_dir, warn, write_json
 
 SEVERITY_ORDER = ("critical", "high", "medium", "low", "info", "unknown")
 
@@ -75,8 +73,8 @@ def _write_results(output_dir: Path, json_text: str) -> None:
 
     findings, malformed = _parse_jsonl(json_text)
 
-    json_file.write_text(json.dumps(findings, indent=2, sort_keys=True), encoding="utf-8")
-    jsonl_file.write_text(json_text, encoding="utf-8")
+    write_json(json_file, findings)
+    atomic_write_text(jsonl_file, json_text, encoding="utf-8")
 
     counts = _severity_counts(findings)
     md_lines: List[str] = [
@@ -118,7 +116,7 @@ def _write_results(output_dir: Path, json_text: str) -> None:
                 md_lines.append(f"- **Description:** {escape(str(description))}")
             md_lines.append("")
 
-    md_file.write_text("\n".join(md_lines), encoding="utf-8")
+    atomic_write_text(md_file, "\n".join(md_lines), encoding="utf-8")
     console.print(f"[green]Wrote nuclei results:[/] {json_file}, {jsonl_file}, and {md_file}")
 
 
@@ -389,32 +387,42 @@ def _clean_nuclei_output(text: str) -> str:
 def _run_nuclei_process(cmd: List[str], timeout: int, out_dir: Path, template_total: Optional[int], target_count: int, enforce_timeout: bool = False, progress_interval: int = 10) -> subprocess.CompletedProcess[str]:
     stdout_path = out_dir / "stdout.tmp"
     stderr_path = out_dir / "stderr.tmp"
-    reporter = ProgressReporter("Nuclei", total=template_total, interval=progress_interval)
-    reporter.update(0, detail=f"targets={target_count}", force=True)
+    timeout_detail = f" timeout={format_duration(timeout)}" if enforce_timeout and timeout > 0 else " timeout=monitor-only"
+    template_detail = f" templates={template_total}" if template_total is not None else " templates=unknown"
+    info(f"Nuclei execution started: targets={target_count}{template_detail}{timeout_detail}")
     started = time.perf_counter()
-    with stdout_path.open("w", encoding="utf-8") as stdout_fh, stderr_path.open("w", encoding="utf-8") as stderr_fh:
-        proc = subprocess.Popen(cmd, stdout=stdout_fh, stderr=stderr_fh, text=True)
-        while proc.poll() is None:
-            elapsed = time.perf_counter() - started
-            if enforce_timeout and timeout > 0 and elapsed >= timeout:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait(timeout=5)
-                raise subprocess.TimeoutExpired(cmd, timeout)
-            completed_estimate = 0
-            if template_total and timeout > 0:
-                completed_estimate = min(template_total - 1, int((elapsed / max(1, timeout)) * template_total))
-            timeout_detail = f" timeout={format_duration(timeout)}" if enforce_timeout and timeout > 0 else " timeout=monitor-only"
-            reporter.update(completed_estimate, detail=f"targets={target_count}{timeout_detail}")
-            time.sleep(1)
-    stdout = stdout_path.read_text(encoding="utf-8-sig") if stdout_path.exists() else ""
-    stderr = stderr_path.read_text(encoding="utf-8-sig") if stderr_path.exists() else ""
-    stdout_path.unlink(missing_ok=True)
-    stderr_path.unlink(missing_ok=True)
-    reporter.update(template_total or 1, total=template_total or 1, detail=f"targets={target_count}", force=True)
+    last_status = started
+    proc: Optional[subprocess.Popen[str]] = None
+    try:
+        with stdout_path.open("w", encoding="utf-8") as stdout_fh, stderr_path.open("w", encoding="utf-8") as stderr_fh:
+            proc = subprocess.Popen(cmd, stdout=stdout_fh, stderr=stderr_fh, text=True)
+            while proc.poll() is None:
+                elapsed = time.perf_counter() - started
+                if enforce_timeout and timeout > 0 and elapsed >= timeout:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=5)
+                    raise subprocess.TimeoutExpired(cmd, timeout)
+                if elapsed >= progress_interval and time.perf_counter() - last_status >= progress_interval:
+                    info(f"Nuclei still running: elapsed={format_duration(elapsed)} targets={target_count}{template_detail}")
+                    last_status = time.perf_counter()
+                time.sleep(1)
+        stdout = stdout_path.read_text(encoding="utf-8-sig") if stdout_path.exists() else ""
+        stderr = stderr_path.read_text(encoding="utf-8-sig") if stderr_path.exists() else ""
+    finally:
+        if proc and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+        stdout_path.unlink(missing_ok=True)
+        stderr_path.unlink(missing_ok=True)
+    info(f"Nuclei execution completed: elapsed={format_duration(time.perf_counter() - started)} targets={target_count}{template_detail}")
     return subprocess.CompletedProcess(cmd, int(proc.returncode or 0), stdout, stderr)
 
 
@@ -584,10 +592,11 @@ def run(
         baseline_target_domain = None
         baseline_target_count = target_ceiling
     baseline_needed = baseline_enabled and bool(selected_tags) and not explicit_templates
+    count_templates_before_run = bool(config_get(config, "nuclei.count_templates_before_run", False))
     baseline_cmd = _baseline_target_command(cmd, baseline_target_domain, baseline_target_list)
     baseline_cmd = _replace_flag_value(baseline_cmd, "-severity", baseline_severity)
-    baseline_template_candidates = _count_matching_templates(baseline_cmd, timeout=min(module_timeout or 60, 60)) if baseline_needed else None
-    template_candidates = _count_matching_templates(cmd, timeout=min(module_timeout or 60, 60))
+    baseline_template_candidates = _count_matching_templates(baseline_cmd, timeout=min(module_timeout or 60, 60)) if baseline_needed and count_templates_before_run else None
+    template_candidates = _count_matching_templates(cmd, timeout=min(module_timeout or 60, 60)) if count_templates_before_run else None
     tag_fallback_reason = ""
     if selected_tags and not explicit_templates and template_candidates == 0:
         tag_fallback_reason = "Selected intelligence tags matched zero templates; retrying with automatic/profile selection"
@@ -608,7 +617,7 @@ def run(
         if automatic_scan and "-as" not in cmd:
             cmd += ["-as"]
         selection_reason = "intelligence tags unavailable; fallback to automatic scan" if automatic_scan else f"intelligence tags unavailable; fallback to profile {profile}"
-        template_candidates = _count_matching_templates(cmd, timeout=min(module_timeout or 60, 60))
+        template_candidates = _count_matching_templates(cmd, timeout=min(module_timeout or 60, 60)) if count_templates_before_run else None
         baseline_needed = False
     info(f"Running nuclei profile={profile} severity={resolved_severity} targets={target_name}" + (" automatic-scan=on" if automatic_scan else ""))
     info(f"Template selection reason: {selection_reason}")
@@ -643,7 +652,7 @@ def run(
             update_proc = _update_templates(module_timeout or get_timeout("nuclei", 300), default_template_dir)
             update_output = _clean_nuclei_output("\n".join(part for part in (update_proc.stdout, update_proc.stderr) if part.strip()))
             if update_output.strip():
-                (out_dir / "template_update.log").write_text(update_output, encoding="utf-8")
+                atomic_write_text(out_dir / "template_update.log", update_output, encoding="utf-8")
             if not _has_templates(default_template_dir):
                 reason = f"templates unavailable at {default_template_dir}"
                 log.error("nuclei templates unavailable after update attempt: %s", update_output.strip() or reason)
@@ -675,7 +684,7 @@ def run(
             if automatic_scan and "-as" not in cmd:
                 cmd += ["-as"]
             selection_reason = "intelligence tags failed; fallback to automatic scan" if automatic_scan else f"intelligence tags failed; fallback to profile {profile}"
-            template_candidates = _count_matching_templates(cmd, timeout=min(module_timeout or 60, 60))
+            template_candidates = _count_matching_templates(cmd, timeout=min(module_timeout or 60, 60)) if count_templates_before_run else None
             baseline_needed = False
             with log_duration(log, "nuclei tag fallback retry"):
                 proc = _run_nuclei_process(cmd, module_timeout, out_dir, template_candidates, target_count, enforce_timeout=enforce_module_timeout, progress_interval=progress_interval)
@@ -715,7 +724,7 @@ def run(
         # Write outputs
         _write_results(out_dir, stdout)
         if stderr.strip():
-            (out_dir / "stderr.log").write_text(stderr, encoding="utf-8")
+            atomic_write_text(out_dir / "stderr.log", stderr, encoding="utf-8")
         log.info("nuclei completed with exit code %s", proc.returncode)
         findings, _ = _parse_jsonl(stdout)
         loaded_templates = _parse_loaded_template_count(stderr)
@@ -741,6 +750,7 @@ def run(
                 "tag_fallback_reason": tag_fallback_reason,
                 "target_scope": target_scope,
                 "template_candidates": template_candidates,
+                "template_count_preflight": count_templates_before_run,
                 "templates_executed": templates_executed,
                 "templates_skipped": templates_skipped,
                 "baseline_scan": {

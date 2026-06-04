@@ -20,14 +20,14 @@ from .utils import ModuleResult, clear_module_output, load_scan_state, nuclei_te
 TECH_PATTERNS: Dict[str, List[str]] = {
     "Apache": ["apache"],
     "Nginx": ["nginx"],
-    "IIS": ["microsoft-iis", "iis"],
+    "IIS": ["microsoft-iis"],
     "LiteSpeed": ["litespeed"],
     "PHP": ["php", "phpsessid", ".php"],
     "ASP.NET": ["asp.net", "x-aspnet", ".aspx"],
-    "Java": ["jsessionid", "java", "spring"],
+    "Java": ["jsessionid", "spring"],
     "Node.js": ["node.js", "express", "x-powered-by: express"],
     "Python": ["django", "flask", "python", "wsgi"],
-    "Laravel": ["laravel", "laravel_session"],
+    "Laravel": ["laravel_session"],
     "WordPress": ["wordpress", "wp-content", "wp-includes"],
     "Drupal": ["drupal"],
     "Joomla": ["joomla"],
@@ -61,7 +61,7 @@ STRONG_TEMPLATE_TECH = {"WordPress", "Drupal", "Joomla", "Laravel"}
 SERVER_TEMPLATE_TECH = {"Apache", "Nginx", "IIS", "LiteSpeed", "PHP", "ASP.NET", "Java", "Node.js", "Python"}
 WEAK_TEMPLATE_TECH = {"React", "Vue", "Angular", "Next.js"}
 FRONTEND_FRAMEWORK_TECH = {"React", "Vue", "Angular", "Next.js"}
-MIN_TEMPLATE_TAG_SCORE = 70
+MIN_TEMPLATE_TAG_SCORE = 80
 
 CLOUD_PATTERNS: Dict[str, List[str]] = {
     "AWS S3": [r"[a-z0-9.-]+\.s3[.-][a-z0-9-]+\.amazonaws\.com", r"s3://[a-z0-9.\-_]+"],
@@ -189,7 +189,7 @@ def detect_technologies(scan_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         if not name:
             return
         confidence = frontend_confidence(name, source, confidence, evidence)
-        row = records.setdefault(name, {"name": name, "sources": set(), "hosts": set(), "confidence": "Medium", "evidence": set()})
+        row = records.setdefault(name, {"name": name, "sources": set(), "hosts": set(), "confidence": confidence.title(), "evidence": set()})
         row["sources"].add(source)
         if host:
             row["hosts"].add(host)
@@ -217,7 +217,7 @@ def detect_technologies(scan_data: Dict[str, Any]) -> List[Dict[str, Any]]:
             )
         if not details:
             for tech in row.get("detected", []) or []:
-                add(str(tech), "Technology Artifact", host, "Medium")
+                add(str(tech), "Technology Artifact", host, "Low")
 
     for row in scan_data.get("probe_rows", []) or []:
         if not isinstance(row, dict):
@@ -236,7 +236,7 @@ def detect_technologies(scan_data: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "; ".join(str(item) for item in evidence if item),
             )
         for tech in row.get("technologies", []) or []:
-            add(str(tech), "probe-fingerprint", host, "Medium")
+            add(str(tech), "probe-fingerprint", host, "Low")
         for key in ("server", "cdn", "waf", "title"):
             for tech in _detect_from_text(str(row.get(key) or "")):
                 add(tech, "probe-header" if key in {"server", "cdn", "waf"} else "html-title", host, "High" if key in {"server", "cdn", "waf"} else "Medium", str(row.get(key) or "")[:120])
@@ -360,8 +360,12 @@ def _template_tag_score(tech: Dict[str, Any], total_hosts: int) -> Tuple[int, st
     reason = f"{confidence} confidence"
 
     if name in STRONG_TEMPLATE_TECH:
-        score += 20
-        reason += "; strong CMS/framework mapping"
+        if confidence.strip().lower() == "high":
+            score += 20
+            reason += "; strong CMS/framework mapping"
+        else:
+            score -= 20
+            reason += "; CMS/framework mapping requires high-confidence evidence"
     elif name in SERVER_TEMPLATE_TECH:
         score += 5
         reason += "; server/framework mapping"
@@ -414,14 +418,13 @@ def recommend_templates(technologies: List[Dict[str, Any]], cloud_assets: List[D
         if accepted:
             selected[name] = tags
     if cloud_assets:
-        selected["Cloud Assets"] = ["cloud", "exposure", "misconfig"]
         scored.append(
             {
                 "technology": "Cloud Assets",
                 "tags": ["cloud", "exposure", "misconfig"],
-                "score": 85,
-                "accepted": True,
-                "reason": "Cloud storage/service reference observed",
+                "score": 65,
+                "accepted": False,
+                "reason": "Cloud storage/service reference observed; kept informational to avoid broad scans",
             }
         )
     selected_tags = sorted({tag for tags in selected.values() for tag in tags})

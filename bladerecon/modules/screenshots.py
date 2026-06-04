@@ -6,7 +6,7 @@ Features:
 - Configurable concurrency (default 10)
 - Option for full page screenshots
 - Saves PNGs to `output/<target>/screenshots/` with readable filenames
-- Rich progress and error handling
+- Low-noise progress and error handling
 """
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn
 
 from .utils import AsyncRateLimiter, ModuleResult, ProgressReporter, check_playwright_chromium, config_get, deduplicate_alive_urls, get_concurrency, get_profiled_ceiling, get_profiled_concurrency, get_profiled_per_host_concurrency, get_profiled_rate_limit, get_timeout, host_key, info, limit_items_with_notice, load_config, log_duration, normalize_scan_profile, normalize_target, prepare_module_output, print_module_summary, setup_logging, skipped_result, skip, success, target_output_dir, warn, write_json
 
@@ -102,8 +101,6 @@ async def _worker(
     queue: asyncio.Queue,
     dest: Path,
     full_page: bool,
-    progress_task_id: int,
-    progress: Progress,
     timeout: int,
     captured: List[str],
     failed: List[Tuple[str, str]],
@@ -146,11 +143,9 @@ async def _worker(
             if last_error:
                 raise last_error
             captured.append(url)
-            progress.update(progress_task_id, advance=1, description=f"[green]OK[/] {url}")
         except Exception as exc:
             reason = str(exc).split(":", 1)[0].strip() or "Screenshot failed"
             failed.append((url, reason))
-            progress.update(progress_task_id, advance=1, description=f"[red]ERR[/] {url}")
             console.log(f"[yellow]{exc}[/]")
         finally:
             if reporter:
@@ -191,22 +186,19 @@ async def _run_screenshots(urls: Iterable[str], dest: Path, concurrency: int = 1
         failed: List[Tuple[str, str]] = []
         reporter = ProgressReporter("Screenshots", total=len(urls), interval=10)
         reporter.update(0, detail=f"profile={profile} concurrency={concurrency} per_host={per_host_limit} rps={limiter.rate_per_second:g}", force=True)
-        with Progress(SpinnerColumn("line"), TextColumn("{task.description}"), BarColumn(), TimeRemainingColumn(), transient=True, refresh_per_second=4) as progress:
-            task_id = progress.add_task(f"Screenshots (concurrency={concurrency})", total=len(urls))
+        for url in urls:
+            await queue.put(url)
 
-            for url in urls:
-                await queue.put(url)
+        tasks = [
+            asyncio.create_task(_worker(browser, queue, dest, full_page, timeout, captured, failed, reporter, limiter, host_sems, per_host_limit))
+            for _ in range(concurrency)
+        ]
 
-            tasks = [
-                asyncio.create_task(_worker(browser, queue, dest, full_page, task_id, progress, timeout, captured, failed, reporter, limiter, host_sems, per_host_limit))
-                for _ in range(concurrency)
-            ]
+        await queue.join()
+        for _ in tasks:
+            await queue.put(None)
 
-            await queue.join()
-            for _ in tasks:
-                await queue.put(None)
-
-            await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(*tasks, return_exceptions=True)
         reporter.update(len(urls), detail=f"captured={len(captured)} failed={len(failed)}", force=True)
 
         failed_file = dest / "failed_screenshots.txt"

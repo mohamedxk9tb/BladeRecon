@@ -1,6 +1,8 @@
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import pytest
+
 from bladerecon.modules import utils
 
 
@@ -158,3 +160,33 @@ def test_chromium_check_warns_when_executable_missing() -> None:
 
     assert ok is False
     assert detail == "Chromium browser not installed"
+
+
+def test_load_config_supports_nested_env_overrides_with_types(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BLADERECON_TIMEOUTS_HTTP", "25")
+    monkeypatch.setenv("BLADERECON_OPSEC_RANDOM_USER_AGENT", "true")
+    monkeypatch.setenv("BLADERECON_NUCLEI__BASELINE_SCAN__ENABLED", "false")
+    monkeypatch.setenv("BLADERECON_SAFETY_PROFILES_SAFE_CONCURRENCY_PROBE", "3")
+
+    config = utils.load_config(Path("missing-config.yaml"))
+
+    assert config["timeouts"]["http"] == 25
+    assert config["opsec"]["random_user_agent"] is True
+    assert config["nuclei"]["baseline_scan"]["enabled"] is False
+    assert config["safety_profiles"]["safe"]["concurrency"]["probe"] == 3
+
+
+def test_atomic_write_text_preserves_existing_file_on_replace_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "artifact.json"
+    path.write_text('{"ok": true}', encoding="utf-8")
+
+    def fail_replace(_src: Path, _dst: Path) -> None:
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(utils.os, "replace", fail_replace)
+
+    with pytest.raises(OSError):
+        utils.atomic_write_text(path, '{"ok": false}', encoding="utf-8")
+
+    assert path.read_text(encoding="utf-8") == '{"ok": true}'
+    assert not list(tmp_path.glob(".artifact.json.*.tmp"))
