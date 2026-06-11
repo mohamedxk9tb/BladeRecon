@@ -55,6 +55,8 @@ HEALTH_MISSING = "MISSING"
 HEALTH_FAILED = "FAILED"
 REPORT_VERSION = "1"
 SAFETY_PROFILES = {"safe", "balanced", "aggressive"}
+RUN_MARKER_FILENAME = ".bladerecon_run.json"
+LATEST_RUN_FILENAME = "latest_run.json"
 
 DEFAULT_USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
@@ -553,7 +555,82 @@ def ensure_within_directory(base: Path, candidate: Path) -> Path:
 
 def target_output_dir(output: Path, target: str) -> Path:
     """Return the safe per-target output directory under *output*."""
+    output_resolved = output.resolve()
+    marker = output_resolved / RUN_MARKER_FILENAME
+    if marker.exists() and _run_marker_matches(marker, target):
+        return output_resolved
     return ensure_within_directory(output, output / normalize_target(target))
+
+
+def _read_json_file_silent(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return None
+
+
+def _run_marker_matches(marker: Path, target: str) -> bool:
+    data = _read_json_file_silent(marker)
+    if not isinstance(data, dict) or data.get("type") != "bladerecon_scan_run":
+        return False
+    return str(data.get("target", "")).strip().lower() == normalize_target(target)
+
+
+def _run_id(profile: str = "") -> str:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    profile_part = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(profile or "").strip().lower()).strip("-")
+    suffix = uuid.uuid4().hex[:8]
+    return "-".join(part for part in (stamp, profile_part, suffix) if part)
+
+
+def create_scan_run_output_dir(output: Path, target: str, profile: str = "") -> Path:
+    """Create an isolated full-scan output directory for *target*."""
+    safe_target = normalize_target(target)
+    target_root = ensure_within_directory(output, output / safe_target)
+    run_id = _run_id(profile)
+    run_dir = ensure_within_directory(target_root, target_root / "runs" / run_id)
+    run_dir.mkdir(parents=True, exist_ok=False)
+    marker = {
+        "type": "bladerecon_scan_run",
+        "target": safe_target,
+        "run_id": run_id,
+        "profile": profile or "",
+        "created_at": now_iso(),
+        "report_version": REPORT_VERSION,
+    }
+    write_json(run_dir / RUN_MARKER_FILENAME, marker)
+    write_json(
+        target_root / LATEST_RUN_FILENAME,
+        {
+            "target": safe_target,
+            "run_id": run_id,
+            "path": str(run_dir),
+            "updated_at": now_iso(),
+        },
+    )
+    return run_dir
+
+
+def resolve_latest_run_output_dir(output: Path, target: str) -> Path:
+    """Return the latest isolated run directory, falling back to legacy output."""
+    safe_target = normalize_target(target)
+    target_root = ensure_within_directory(output, output / safe_target)
+    latest = target_root / LATEST_RUN_FILENAME
+    data = _read_json_file_silent(latest)
+    if isinstance(data, dict):
+        run_path_value = str(data.get("path", "")).strip()
+        if run_path_value:
+            run_path = Path(run_path_value)
+            if not run_path.is_absolute():
+                run_path = target_root / run_path
+            try:
+                run_dir = ensure_within_directory(target_root, run_path)
+                marker = run_dir / RUN_MARKER_FILENAME
+                if run_dir.exists() and _run_marker_matches(marker, safe_target):
+                    return run_dir
+            except Exception:
+                pass
+    return target_output_dir(output, safe_target)
 
 
 def clear_module_output(output: Path, target: str, module_name: str) -> None:

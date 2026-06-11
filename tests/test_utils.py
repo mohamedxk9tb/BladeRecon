@@ -60,6 +60,19 @@ def test_prepare_module_output_clears_stale_files_unless_resuming(tmp_path: Path
     assert fresh.exists()
 
 
+def test_scan_run_output_dirs_are_isolated_and_latest_resolves(tmp_path: Path) -> None:
+    first = utils.create_scan_run_output_dir(tmp_path, "example.com", "safe")
+    second = utils.create_scan_run_output_dir(tmp_path, "example.com", "safe")
+
+    assert first != second
+    assert first.parent == second.parent == (tmp_path / "example.com" / "runs").resolve()
+    assert (first / utils.RUN_MARKER_FILENAME).exists()
+    assert (second / utils.RUN_MARKER_FILENAME).exists()
+    assert utils.target_output_dir(first, "example.com") == first
+    assert utils.resolve_latest_run_output_dir(tmp_path, "example.com") == second
+    assert utils.target_output_dir(tmp_path, "example.com") == (tmp_path / "example.com").resolve()
+
+
 def test_scan_state_tracks_completed_and_failed_modules(tmp_path: Path) -> None:
     utils.update_scan_state("example.com", tmp_path, "probe", "completed", 1.25)
     utils.update_scan_state("example.com", tmp_path, "nuclei", "failed", 0.5, "missing binary")

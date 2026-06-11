@@ -41,6 +41,7 @@ from .modules.utils import (
     dependency_health,
     error,
     format_duration,
+    create_scan_run_output_dir,
     info,
     load_config as load_project_config,
     normalize_scan_profile,
@@ -53,6 +54,7 @@ from .modules.utils import (
     readiness_failures,
     scan_state_path,
     skip,
+    resolve_latest_run_output_dir,
     save_scan_state,
     success,
     target_output_dir,
@@ -1035,30 +1037,33 @@ def full(
     from .modules import subdomains as submod  # type: ignore
     from .modules.utils import load_scan_state, setup_logging
 
+    workflow_output = resolve_latest_run_output_dir(output, domain) if resume_mode else create_scan_run_output_dir(output, domain, active_profile)
+    info(f"Output run: {workflow_output}")
+
     if not resume_mode:
-        scan_state_path(domain, output).unlink(missing_ok=True)
-    log = setup_logging(domain, output, "full")
-    state = load_scan_state(domain, output) if resume_mode else {}
+        scan_state_path(domain, workflow_output).unlink(missing_ok=True)
+    log = setup_logging(domain, workflow_output, "full")
+    state = load_scan_state(domain, workflow_output) if resume_mode else {}
     state["scan_profile"] = active_profile
     state["framework_version"] = __version__
     state.setdefault("report_version", "1")
-    save_scan_state(domain, output, state)
+    save_scan_state(domain, workflow_output, state)
     completed = set(state.get("completed_modules", []))
     scan_started = time.perf_counter()
     scan_monitor = PerformanceMonitor().start()
     steps = [
-        ("subdomains", lambda: submod.run(domain=domain, output=output, proxy=proxy, user_agent=user_agent, random_user_agent=random_user_agent, resume=resume_mode)),
-        ("probe", lambda: probemod.run(domain=domain, output=output, proxy=proxy, user_agent=user_agent, random_user_agent=random_user_agent, resume=resume_mode, profile=active_profile)),
-        ("js", lambda: jsmod.run(domain=domain, output=output, proxy=proxy, user_agent=user_agent, random_user_agent=random_user_agent, resume=resume_mode, profile=active_profile)),
-        ("endpoints", lambda: endpointmod.run(domain=domain, output=output, resume=resume_mode)),
-        ("secrets", lambda: secretmod.run(domain=domain, output=output, resume=resume_mode)),
-        ("parameters", lambda: pmod.run(target=domain, output=output, resume=resume_mode)),
-        ("intelligence", lambda: intelmod.run(target=domain, output=output, resume=resume_mode)),
-        ("advanced", lambda: advmod.run(target=domain, output=output, resume=resume_mode, profile=active_profile)),
-        ("screenshots", lambda: shots.run(domain=domain, output=output, resume=resume_mode, profile=active_profile)),
+        ("subdomains", lambda: submod.run(domain=domain, output=workflow_output, proxy=proxy, user_agent=user_agent, random_user_agent=random_user_agent, resume=resume_mode)),
+        ("probe", lambda: probemod.run(domain=domain, output=workflow_output, proxy=proxy, user_agent=user_agent, random_user_agent=random_user_agent, resume=resume_mode, profile=active_profile)),
+        ("js", lambda: jsmod.run(domain=domain, output=workflow_output, proxy=proxy, user_agent=user_agent, random_user_agent=random_user_agent, resume=resume_mode, profile=active_profile)),
+        ("endpoints", lambda: endpointmod.run(domain=domain, output=workflow_output, resume=resume_mode)),
+        ("secrets", lambda: secretmod.run(domain=domain, output=workflow_output, resume=resume_mode)),
+        ("parameters", lambda: pmod.run(target=domain, output=workflow_output, resume=resume_mode)),
+        ("intelligence", lambda: intelmod.run(target=domain, output=workflow_output, resume=resume_mode)),
+        ("advanced", lambda: advmod.run(target=domain, output=workflow_output, resume=resume_mode, profile=active_profile)),
+        ("screenshots", lambda: shots.run(domain=domain, output=workflow_output, resume=resume_mode, profile=active_profile)),
     ]
     if all:
-        steps.append(("nuclei", lambda: nmod.run(domain=domain, output=output, resume=resume_mode, profile=active_profile)))
+        steps.append(("nuclei", lambda: nmod.run(domain=domain, output=workflow_output, resume=resume_mode, profile=active_profile)))
     module_durations: List[float] = []
     module_titles = {
         "subdomains": "Subdomain Enumeration",
@@ -1089,33 +1094,33 @@ def full(
             module_perf = module_monitor.stop()
             if getattr(result, "status", "") == "skipped":
                 reason = getattr(result, "reason", "Skipped")
-                update_scan_state(domain, output, step_name, "skipped", step_duration, reason, performance=module_perf)
+                update_scan_state(domain, workflow_output, step_name, "skipped", step_duration, reason, performance=module_perf)
                 skip(f"Skipped {step_name} in {step_duration:.2f}s")
                 info(f"Reason: {reason}")
                 log.info("Step skipped: %s in %.2fs (%s)", step_name, step_duration, reason)
                 continue
             if getattr(result, "status", "") == "failed":
                 reason = getattr(result, "reason", "Failed")
-                update_scan_state(domain, output, step_name, "failed", step_duration, reason, performance=module_perf)
+                update_scan_state(domain, workflow_output, step_name, "failed", step_duration, reason, performance=module_perf)
                 warn(f"Failed {step_name} in {step_duration:.2f}s")
                 info(f"Reason: {reason}")
                 log.warning("Step failed: %s in %.2fs (%s)", step_name, step_duration, reason)
                 continue
             if getattr(result, "status", "") == "timed_out":
                 reason = getattr(result, "reason", "Timed out")
-                update_scan_state(domain, output, step_name, "timed_out", step_duration, reason, performance=module_perf)
+                update_scan_state(domain, workflow_output, step_name, "timed_out", step_duration, reason, performance=module_perf)
                 warn(f"Timed out {step_name} in {step_duration:.2f}s")
                 info(f"Reason: {reason}")
                 log.warning("Step timed out: %s in %.2fs (%s)", step_name, step_duration, reason)
                 continue
-            update_scan_state(domain, output, step_name, "completed", step_duration, performance=module_perf)
+            update_scan_state(domain, workflow_output, step_name, "completed", step_duration, performance=module_perf)
             success(f"Completed {step_name} in {step_duration:.2f}s")
             log.info("Step completed: %s in %.2fs", step_name, step_duration)
         except Exception as exc:
             step_duration = time.perf_counter() - step_started
             module_durations.append(step_duration)
             module_perf = module_monitor.stop()
-            update_scan_state(domain, output, step_name, "failed", step_duration, str(exc), performance=module_perf)
+            update_scan_state(domain, workflow_output, step_name, "failed", step_duration, str(exc), performance=module_perf)
             log.exception("Step failed: %s", step_name)
             warn(f"{step_name} failed; continuing: {exc}")
 
@@ -1123,10 +1128,10 @@ def full(
     scan_perf = scan_monitor.stop()
     write_scan_metadata(
         domain,
-        output,
+        workflow_output,
         duration_seconds=round(duration, 2),
         duration_human=f"{duration:.2f}s",
-        performance={**scan_perf, **_collect_traffic_counts(domain, output)},
+        performance={**scan_perf, **_collect_traffic_counts(domain, workflow_output)},
     )
     if report:
         report_started = time.perf_counter()
@@ -1134,18 +1139,18 @@ def full(
         try:
             print_module_header("Report Generation", domain)
             info("Starting report")
-            rmod.run(domain, output=output, scan_duration=f"{duration:.2f}s")
+            rmod.run(domain, output=workflow_output, scan_duration=f"{duration:.2f}s")
             report_duration = time.perf_counter() - report_started
-            update_scan_state(domain, output, "report", "completed", report_duration, performance=report_monitor.stop())
+            update_scan_state(domain, workflow_output, "report", "completed", report_duration, performance=report_monitor.stop())
             success(f"Completed report in {report_duration:.2f}s")
         except Exception as exc:
             report_duration = time.perf_counter() - report_started
-            update_scan_state(domain, output, "report", "failed", report_duration, str(exc), performance=report_monitor.stop())
+            update_scan_state(domain, workflow_output, "report", "failed", report_duration, str(exc), performance=report_monitor.stop())
             log.exception("Step failed: report")
             warn(f"report failed; continuing: {exc}")
     log.info("Full scan duration: %.2fs", duration)
-    _print_slowest_modules(domain, output)
-    print_scan_summary(_collect_summary(domain, output, f"{duration:.2f}s"))
+    _print_slowest_modules(domain, workflow_output)
+    print_scan_summary(_collect_summary(domain, workflow_output, f"{duration:.2f}s"))
     success("Full run completed")
 
 

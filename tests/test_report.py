@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from bladerecon.modules import report
+from bladerecon.modules.utils import create_scan_run_output_dir
 
 
 def test_asset_data_uri_skips_large_embedded_assets(tmp_path: Path) -> None:
@@ -385,6 +386,22 @@ def test_report_rendering_with_minimal_outputs(tmp_path: Path) -> None:
     assert "| Nginx 1.30.1 | High |" in md
     assert "nginx/1.30.1 | www.example.com |" in md
     assert "![](../screenshots/www.example.com.png)" in md
+
+
+def test_report_prefers_latest_isolated_run_over_legacy_target_dir(tmp_path: Path) -> None:
+    legacy_target = tmp_path / "example.com"
+    legacy_target.mkdir(parents=True)
+    run_dir = create_scan_run_output_dir(tmp_path, "example.com", "balanced")
+    (run_dir / "subdomains").mkdir()
+    (run_dir / "subdomains" / "subdomains.txt").write_text("run.example.com\n", encoding="utf-8")
+    (run_dir / "probe").mkdir()
+    (run_dir / "probe" / "alive.txt").write_text("https://run.example.com\n", encoding="utf-8")
+
+    report.run("example.com", output=tmp_path)
+
+    assert (run_dir / "reports" / "report.md").exists()
+    assert not (legacy_target / "reports" / "report.md").exists()
+    assert "run.example.com" in (run_dir / "reports" / "report.md").read_text(encoding="utf-8")
 
 
 def test_report_encodes_screenshot_paths_relative_to_report_dir(tmp_path: Path) -> None:

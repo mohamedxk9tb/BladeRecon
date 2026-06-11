@@ -34,7 +34,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from rich.console import Console
 
 from .. import __version__
-from .utils import REPORT_VERSION, atomic_write_text, check_playwright_chromium, deduplicate_alive_urls, deduplicate_parameters, deduplicate_subdomains, dependency_health, info, nuclei_template_status, print_module_summary, setup_logging, success, target_output_dir, warn
+from .utils import REPORT_VERSION, RUN_MARKER_FILENAME, atomic_write_text, check_playwright_chromium, deduplicate_alive_urls, deduplicate_parameters, deduplicate_subdomains, dependency_health, info, nuclei_template_status, print_module_summary, resolve_latest_run_output_dir, setup_logging, success, target_output_dir, warn
 
 console = Console()
 
@@ -1606,11 +1606,12 @@ def run(target: str, output: Path = Path("results"), scan_duration: Optional[str
     The `output` is the base results folder where per-target subfolders exist.
     """
     target = target.strip()
-    target_dir = target_output_dir(output, target)
+    target_dir = resolve_latest_run_output_dir(output, target)
     if not target_dir.exists():
         console.print(f"[red]Results for target not found:[/] {target_dir}")
         return
-    log = setup_logging(target, output, "report")
+    log_output = target_dir if (target_dir / RUN_MARKER_FILENAME).exists() else output
+    log = setup_logging(target, log_output, "report")
     started = time.perf_counter()
 
     info(f"Generating report for {target}")
